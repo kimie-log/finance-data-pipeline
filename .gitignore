@@ -62,9 +62,9 @@ Temporary Items
 
 # Custom rules
 
-# gcp credentials (移除開頭的點，確保對應到 gcp_keys/ 資料夾)
+# gcp credentials
 gcp_keys/
-*.json
+gcp_keys/*.json
 
 # environment files
 .env
@@ -72,6 +72,6 @@ gcp_keys/
 # data files
 data/
 
-# Python cache (新增這行來排除 pycache)
+# Python cache
 **/__pycache__/
 *.pyc

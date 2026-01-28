@@ -14,8 +14,7 @@ sys.path.insert(0, str(ROOT_DIR))
 load_dotenv()
 
 # 匯入模組
-from ingestion.get_close_price import get_daily_close_prices_data
-from ingestion.stock_selector import get_top_stocks_by_market_value
+from ingestion.yfinance_fetcher import YFinanceFetcher
 from ingestion.finlab_fetcher import FinLabFetcher
 from processing.transformer import Transformer
 from utils.google_cloud_storage import upload_file
@@ -75,7 +74,7 @@ excluded_industry = config["top_stocks"].get("excluded_industry", [])
 pre_list_date = config["top_stocks"].get("pre_list_date", None)
 top_n = config["top_stocks"].get("top_n", 50)
 
-top50_tickers = get_top_stocks_by_market_value(
+top50_tickers = FinLabFetcher.fetch_top_stocks_by_market_value(
     excluded_industry=excluded_industry,
     pre_list_date=pre_list_date,
     top_n=top_n,
@@ -97,7 +96,7 @@ try:
     is_tw_stock: stock_symbols 是否是台灣股票
     return: 每日股票收盤價資料表 (索引是日期(DatetimeIndex格式)，欄位名稱為純股票代碼)
     '''
-    df_close_raw = get_daily_close_prices_data(
+    df_close_raw = YFinanceFetcher.fetch_daily_close_prices(
         stock_symbols=top50_tickers, 
         start_date=start_date, 
         end_date=end_date, 

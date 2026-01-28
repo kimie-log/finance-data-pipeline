@@ -1,12 +1,18 @@
 # Requirements for the project
+
+# 核心資料處理與金融資料
 yfinance
 finlab
 pandas
-pandas-gbq
+numpy
+
+# 設定與環境變數
 pyyaml
+python-dotenv
+
+# Google Cloud
 google-cloud-storage
 google-cloud-bigquery
-loguru
-dotenv
-pandera
+
+# Parquet / BigQuery 相容
 pyarrow
