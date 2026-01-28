@@ -1,0 +1,12 @@
+# Requirements for the project
+yfinance
+finlab
+pandas
+pandas-gbq
+pyyaml
+google-cloud-storage
+google-cloud-bigquery
+loguru
+dotenv
+pandera
+pyarrow
