@@ -7,7 +7,12 @@ def get_top_stocks_by_market_value(
     pre_list_date: Annotated[str, "上市日期須早於此指定日期"] | None = None,
     top_n: Annotated[int, "市值前 N 大的公司"] | None = None,
 ) -> Annotated[List[str], "符合條件的公司代碼列表"]:
-
+    '''
+    函式說明：
+    取得市值前 N 大的公司代碼列表，並根據指定條件進行過濾
+    公司代碼會根據其市場別自動添加 Yahoo Finance 後綴
+    (上市: .TW, 上櫃: .TWO)。
+    '''
     # 1. 取得公司基本資訊
     # 注意：必須包含 '市場別' 欄位，才能區分上市/上櫃
     company_info = data.get("company_basic_info")[
@@ -18,8 +23,9 @@ def get_top_stocks_by_market_value(
     if excluded_industry:
         company_info = company_info[~company_info["產業類別"].isin(excluded_industry)]
     
-    # 3. 過濾上市日期
+    # 3. 過濾上市日期 & 市場別 (僅上市公司)
     if pre_list_date:
+        company_info = company_info[company_info["市場別"] == "sii"]
         company_info = company_info[company_info["上市日期"] < pre_list_date]
 
     # 4. 取得市值並過濾 Top N
@@ -31,21 +37,7 @@ def get_top_stocks_by_market_value(
         company_info = pd.merge(latest_market_value, company_info, on="stock_id")
         company_info = company_info.sort_values(by="market_value", ascending=False).head(top_n)
 
-    # -------------------------------------------------------
-    # 關鍵修正邏輯：處理 Yahoo Finance 後綴
-    # 上市 (sii) -> .TW
-    # 上櫃 (otc) -> .TWO
-    # -------------------------------------------------------
-    def append_suffix(row):
-        stock_id = row["stock_id"]
-        market = row["市場別"] # finlab 資料中，'sii'=上市, 'otc'=上櫃
-        
-        # 轉小寫比較比較保險
-        if str(market).lower() == "otc":
-            return f"{stock_id}.TWO"
-        else:
-            return f"{stock_id}.TW"
-
-    tickers = company_info.apply(append_suffix, axis=1).tolist()
+        return company_info.head(top_n)["stock_id"].tolist()
+    else:
+        return company_info["stock_id"].tolist()
     
-    return tickers
