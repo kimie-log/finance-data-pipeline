@@ -1,55 +1,79 @@
 import os
+import gc
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
-from google.oauth2 import service_account
 import pandas as pd
 from utils.logger import logger
+from typing import Annotated
 
-def load_to_bigquery(df: pd.DataFrame, dataset_id: str, table_id: str, if_exists: str = 'append'):
+def load_to_bigquery(
+    df: Annotated[pd.DataFrame, "要上傳到 BigQuery 的 DataFrame"],
+    dataset_id: Annotated[str, "BigQuery Dataset ID"],
+    table_id: Annotated[str, "BigQuery Table ID"],
+    if_exists: Annotated[str, "BigQuery 如何處理已存在的資料"] = 'upsert'
+):
     """
-    將 DataFrame 上傳至 BigQuery，若 Dataset 不存在則自動建立。
+    函數說明：
+    使用 暫存表 + MERGE 的方式將 DataFrame 上傳到 BigQuery，支援 Upsert 功能
     """
     try:
-        # 1. 建立 Client
         project_id = os.getenv("GCP_PROJECT_ID")
-        # 如果環境變數已有憑證，直接建立 Client 即可
         client = bigquery.Client(project=project_id)
 
-        # 2. 檢查並建立 Dataset (自動化關鍵邏輯)
+        # 確保 Dataset 存在
         dataset_ref = client.dataset(dataset_id)
-        
         try:
             client.get_dataset(dataset_ref)
-            # logger.info(f"Dataset {dataset_id} exists.")
         except NotFound:
-            logger.warning(f"Dataset {dataset_id} not found. Creating it now...")
             dataset = bigquery.Dataset(dataset_ref)
-            dataset.location = "asia-east1"  
+            dataset.location = "asia-east1"
             client.create_dataset(dataset)
-            logger.info(f"Successfully created dataset: {dataset_id}")
+            logger.info(f"Created dataset: {dataset_id}")
 
-        # 3. 設定 Table 參照
-        table_ref = dataset_ref.table(table_id)
+        # 如果使用者只想簡單 append 或 truncate
+        if if_exists != 'upsert':
+            job_config = bigquery.LoadJobConfig(write_disposition=f"WRITE_{if_exists.upper()}")
+            client.load_table_from_dataframe(df, dataset_ref.table(table_id), job_config=job_config).result()
+            return
 
-        # 4. 設定 Job Config
-        job_config = bigquery.LoadJobConfig(
-            autodetect=True, # 自動偵測 Schema (Float, String, Date...)
-            write_disposition=f"WRITE_{if_exists.upper()}", # WRITE_APPEND 或 WRITE_TRUNCATE
-        )
+        # 執行 Upsert (Merge) 邏輯
+        staging_table_id = f"{table_id}_staging_{pd.Timestamp.now().strftime('%H%M%S')}"
+        staging_table_ref = dataset_ref.table(staging_table_id)
+        target_table_ref = dataset_ref.table(table_id)
 
-        logger.info(f"Uploading {len(df)} rows to {dataset_id}.{table_id}...")
+        # 將資料上傳到暫存表 (Truncate 確保暫存表乾淨)
+        job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+        client.load_table_from_dataframe(df, staging_table_ref, job_config=job_config).result()
 
-        # 5. 執行上傳 Job
-        job = client.load_table_from_dataframe(
-            df, table_ref, job_config=job_config
-        )
+        # 執行 MERGE SQL
+        # 主鍵是 date 和 stock_id
+        merge_sql = f"""
+        MERGE `{project_id}.{dataset_id}.{table_id}` T
+        USING `{project_id}.{dataset_id}.{staging_table_id}` S
+        ON T.date = S.date AND T.stock_id = S.stock_id
+        WHEN MATCHED THEN
+            UPDATE SET close = S.close, daily_return = S.daily_return
+        WHEN NOT MATCHED THEN
+            INSERT (date, stock_id, close, daily_return) 
+            VALUES (date, stock_id, close, daily_return)
+        """
         
-        job.result()  # 等待 Job 完成
-        
-        # 6. 確認結果
-        table = client.get_table(table_ref)
-        logger.info(f"✅ Loaded {table.num_rows} rows to BigQuery: {dataset_id}.{table_id}")
+        # 檢查目標表是否存在，不存在則直接從暫存表建立
+        try:
+            client.get_table(target_table_ref)
+            query_job = client.query(merge_sql)
+            query_job.result()
+            logger.info(f"Upsert completed for {table_id}")
+        except NotFound:
+            # 如果目標表根本不存在，直接把暫存表重新命名或複製過去
+            logger.info(f"Target table {table_id} not found, creating from staging...")
+            client.copy_table(staging_table_ref, target_table_ref).result()
+
+        # 刪除暫存表
+        client.delete_table(staging_table_ref, not_found_ok=True)
 
     except Exception as e:
-        logger.error(f"❌ BigQuery Load Error: {e}")
+        logger.error(f"BigQuery Load Error: {e}")
         raise
+    finally:
+        gc.collect() # 執行完畢強制回收記憶體

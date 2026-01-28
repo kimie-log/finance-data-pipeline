@@ -174,4 +174,5 @@ try:
 
 except Exception as e:
     logger.error(f"Loading Failed: {e}")
+    sys.exit(1)
 # %%

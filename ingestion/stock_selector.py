@@ -11,22 +11,21 @@ def get_top_stocks_by_market_value(
     函式說明：
     取得市值前 N 大的公司代碼列表，並根據指定條件進行過濾
     '''
-    # 1. 取得公司基本資訊
-    # 注意：必須包含 '市場別' 欄位，才能區分上市/上櫃
+    # 取得公司基本資訊
     company_info = data.get("company_basic_info")[
         ["stock_id", "公司名稱", "上市日期", "產業類別", "市場別"]
     ]
     
-    # 2. 過濾產業
+    # 過濾產業
     if excluded_industry:
         company_info = company_info[~company_info["產業類別"].isin(excluded_industry)]
     
-    # 3. 過濾上市日期 & 市場別 (僅上市公司)
+    # 過濾上市日期 & 市場別 (僅上市公司)
     if pre_list_date:
         company_info = company_info[company_info["市場別"] == "sii"]
         company_info = company_info[company_info["上市日期"] < pre_list_date]
 
-    # 4. 取得市值並過濾 Top N
+    # 取得市值並過濾 Top N
     if top_n:
         df_market_value = data.get("etl:market_value")
         latest_market_value = df_market_value.iloc[-1].rename("market_value").reset_index()
