@@ -10,6 +10,9 @@ numpy
 pyyaml
 python-dotenv
 
+# 測試
+pytest
+
 # Google Cloud
 google-cloud-storage
 google-cloud-bigquery

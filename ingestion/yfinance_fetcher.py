@@ -39,23 +39,28 @@ class YFinanceFetcher:
         stock_data = yf.download(stock_symbols, start=start_date, end=end_date, auto_adjust=True)
 
         # 2. 處理資料結構 (只取 Close)
-        # yfinance 若下載多檔股票，columns 會是 MultiIndex (Price, Ticker)
-        if isinstance(stock_data.columns, pd.MultiIndex):
-            try:
-                # 優先取 Close，若 auto_adjust=True 有時會直接回傳修正後價格，視版本而定
-                # 這裡做個防呆，確保取到收盤價
-                target_col = "Close" if "Close" in stock_data.columns.levels[0] else stock_data.columns.levels[0][0]
-                stock_data = stock_data[target_col]
-            except Exception as e:
-                print(f"Error extracting Close price: {e}")
-                return pd.DataFrame()
-        elif "Close" in stock_data.columns:
-            stock_data = stock_data["Close"]
-
-        # 3. 處理單支股票的特殊情況 (Series -> DataFrame)
+        # 先處理單支股票 Series，避免直接存取 .columns 造成錯誤
         if isinstance(stock_data, pd.Series):
             stock_data = stock_data.to_frame()
             stock_data.columns = stock_symbols
+        else:
+            # yfinance 若下載多檔股票，columns 會是 MultiIndex (Price, Ticker)
+            if isinstance(stock_data.columns, pd.MultiIndex):
+                try:
+                    # 優先取 Close，若 auto_adjust=True 有時會直接回傳修正後價格，視版本而定
+                    # 這裡做個防呆，確保取到收盤價
+                    target_col = "Close" if "Close" in stock_data.columns.levels[0] else stock_data.columns.levels[0][0]
+                    stock_data = stock_data[target_col]
+                except Exception as e:
+                    print(f"Error extracting Close price: {e}")
+                    return pd.DataFrame()
+            elif "Close" in stock_data.columns:
+                stock_data = stock_data["Close"]
+
+            # 3. 處理單支股票的特殊情況 (Series -> DataFrame)
+            if isinstance(stock_data, pd.Series):
+                stock_data = stock_data.to_frame()
+                stock_data.columns = stock_symbols
 
         # 4. 處理缺失值 (Forward Fill)
         stock_data = stock_data.ffill()
