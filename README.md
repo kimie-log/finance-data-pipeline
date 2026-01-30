@@ -19,18 +19,18 @@
 |------|------------|
 | **Ingestion** | 用 FinLab 依**指定市值日**篩選 Top N 股票（可排除產業、上市日期），取得 **universe**（含 `delist_date` 若 FinLab 有）；用 yfinance 抓這些股票的 **OHLCV**（開高低收量），並處理除權息（`auto_adjust=True`）。 |
 | **Transformation** | 對 OHLCV 做清洗、補值、計算 **daily_return**，並標記 **is_suspended / is_limit_up / is_limit_down**（交易可行性）。 |
-| **Loading** | 將 raw / processed parquet 寫到本地 `data/raw/interval/`、`data/processed/interval/`，可選上傳 **GCS**；再寫入 **BigQuery**（upsert 價量表、truncate 維度與輔助表）。 |
+| **Loading** | 將 raw / processed parquet 寫到本地 `data/raw/{date}/`、`data/processed/{date}/`，可選上傳 **GCS**；再寫入 **BigQuery**（upsert 價量表、truncate 維度與輔助表）。 |
 
 #### 二、BigQuery 產出內容
 
 | 表／用途 | 說明 |
 |----------|------|
-| **fact_price_*** | 價量事實表：date、stock_id、open/high/low/close、volume、daily_return、is_suspended、is_limit_up、is_limit_down。 |
-| **dim_universe_*** | 維度表：該市值日的 Top N 股票清單（含 delist_date 等）。 |
-| **dim_calendar** | 交易日曆（由價量日期產生，供回測對齊）。 |
-| **fact_benchmark_daily** | 基準指數（預設加權 ^TWII）日收盤與日報酬。 |
-| **dim_backtest_config** | 回測預設參數（手續費、證交稅等）。 |
-| **fact_factor_***（可選） | 財報／基本面因子日頻資料（需 `--with-factors` 且設定 `factors.factor_names`）。 |
+| **fact_price** | 價量事實表：date、stock_id、open/high/low/close、volume、daily_return、is_suspended、is_limit_up、is_limit_down。Dataset: `{base}_s{start}_e{end}_mv{date}`。 |
+| **dim_universe** | 維度表：該市值日的 Top N 股票清單（含 delist_date 等）。Dataset: `{base}_s{start}_e{end}_mv{date}`。 |
+| **dim_calendar** | 交易日曆（由價量日期產生，供回測對齊）。Dataset: `{base}_s{start}_e{end}_mv{date}`。 |
+| **fact_benchmark_daily** | 基準指數（預設加權 ^TWII）日收盤與日報酬。Dataset: `{base}_s{start}_e{end}_mv{date}`。 |
+| **dim_backtest_config** | 回測預設參數（手續費、證交稅等）。Dataset: `{base}_s{start}_e{end}_mv{date}`。 |
+| **fact_factor** 或 **fact_factor_{suffix}**（可選） | 財報／基本面因子日頻資料（需 `--with-factors` 且設定 `factors.factor_names`）。Dataset: `{base}_s{start}_e{end}_mv{date}`。 |
 
 #### 三、資料輸入輸出與回測／因子分析對照
 
@@ -52,27 +52,27 @@
 
 | 產出 | 位置／表名 | 回測用 | 因子分析用 |
 |------|------------|--------|------------|
-| 價量事實表 | `fact_price_mv{date}_s{start}_e{end}_top{n}` | ✓ 報酬、OHLCV、交易可行性 | ✓ 報酬／價量 |
-| Universe 維度表 | `dim_universe_mv{date}_top{n}` | ✓ 標的清單、delist_date | ✓ 標的範圍 |
+| 價量事實表 | `fact_price`（dataset: `{base}_s{start}_e{end}_mv{date}`） | ✓ 報酬、OHLCV、交易可行性 | ✓ 報酬／價量 |
+| Universe 維度表 | `dim_universe`（dataset: `{base}_s{start}_e{end}_mv{date}`） | ✓ 標的清單、delist_date | ✓ 標的範圍 |
 | 交易日曆 | `dim_calendar` | ✓ 對齊交易日 | ✓ 對齊日期 |
 | 基準指數 | `fact_benchmark_daily` | ✓ 績效比較 | — |
 | 回測參數 | `dim_backtest_config` | ✓ 手續費／稅 | — |
-| 因子表（可選） | `fact_factor_mv{date}_s..._top{n}` | ✓ 選股／加權 | ✓ 因子值、排名 |
-| Raw / Processed Parquet | `data/raw/interval/`、`data/processed/interval/` | 備援、重跑 | 備援、重跑 |
+| 因子表（可選） | `fact_factor` 或 `fact_factor_{suffix}`（dataset: `{base}_s{start}_e{end}_mv{date}`） | ✓ 選股／加權 | ✓ 因子值、排名 |
+| Raw / Processed Parquet | `data/raw/{date}/`、`data/processed/{date}/` | 備援、重跑 | 備援、重跑 |
 
 **回測所需對照**
 
-- 價量與日報酬：`fact_price_*`（date, stock_id, open/high/low/close, volume, daily_return）。
-- 交易可行性：`fact_price_*`（is_suspended, is_limit_up, is_limit_down）。
-- 標的清單與下市日：`dim_universe_*`（stock_id, delist_date 等）。
+- 價量與日報酬：`fact_price`（date, stock_id, open/high/low/close, volume, daily_return），位於 dataset `{base}_s{start}_e{end}_mv{date}`。
+- 交易可行性：`fact_price`（is_suspended, is_limit_up, is_limit_down）。
+- 標的清單與下市日：`dim_universe`（stock_id, delist_date 等），位於 dataset `{base}_s{start}_e{end}_mv{date}`。
 - 交易日對齊：`dim_calendar`（date, is_trading_day）。
 - 基準與成本：`fact_benchmark_daily`、`dim_backtest_config`。
 - 可重現性：固定市值日 + 區間，同一組參數產出一致。
 
 **因子分析所需對照**
 
-- 因子值：`fact_factor_*`（date, stock_id, factor_name, value）或程式內 `FinLabFactorFetcher.get_factor_data` / `FinLabFactorFetcher.fetch_factors_daily`。
-- 價量／報酬：同上 `fact_price_*`。
+- 因子值：`fact_factor` 或 `fact_factor_{suffix}`（date, stock_id, factor_name, value），位於 dataset `{base}_s{start}_e{end}_mv{date}`；或程式內 `FinLabFactorFetcher.get_factor_data` / `FinLabFactorFetcher.fetch_factors_daily`。
+- 價量／報酬：同上 `fact_price`（位於相同 dataset）。
 - 單因子／多因子排名：程式內 `FactorRanking.rank_stocks_by_factor`、`FactorRanking.calculate_weighted_rank`（見下方「因子相關」）。
 
 **小結**：目前資料輸入、輸出與產生的檔案足以支援回測與因子分析。專案已實作三項優化：（1）**滾動回測**：可用 `--market-value-dates 2024-01-15,2024-02-15,...` 一次跑多個市值日 ETL；（2）**本地檔名**：raw／processed parquet 檔名含 `mv{日期}_top{n}`，與 BigQuery 表名對應；（3）**因子表並存**：同一組 (mv, start, end, top_n) 可透過 `--factor-table-suffix`（或設定檔 `factors.factor_table_suffix`）並存多組因子表。
@@ -187,7 +187,7 @@ yfinance:
   end: null                    # 或指定結束日，例如 "2024-12-31"
 
 bigquery:
-  dataset: "your_dataset_name"  # 可用 {top_n} / {_top_n} 自動代換
+  dataset: "tw_top_{_top_n}_stock_data"  # 可用 {top_n} / {_top_n} 自動代換；最終 dataset 為 {base}_s{start}_e{end}_mv{date}
 
 factors:
   factor_names: []             # 例: ["營業利益", "營業收入"]，搭配 --with-factors 落地 BigQuery
@@ -237,7 +237,7 @@ python -m scripts.run_etl_pipeline --market-value-date 2024-01-15 --start 2020-0
 - `--pre-list-date`：上市日期需早於指定日期
 - `--dataset`：覆寫 BigQuery dataset
 - `--skip-gcs`：略過上傳 GCS（僅保留本地輸出）
-- `--with-factors`：一併抓取財報因子並寫入 `fact_factor*`
+- `--with-factors`：一併抓取財報因子並寫入 `fact_factor`（可加 `--factor-table-suffix` 並存多組）
 - `--factor-table-suffix`：因子表名後綴，同一組 (mv, start, end, top_n) 可並存多組因子（例：`value`、`momentum`）
 - `--skip-benchmark`：略過基準指數寫入
 - `--skip-calendar`：略過交易日曆寫入
@@ -247,20 +247,21 @@ python -m scripts.run_etl_pipeline --market-value-date 2024-01-15 --start 2020-0
 1. **Ingestion**
    - 使用 FinLab 取得 Top N 市值股票 **universe** (`FinLabFetcher.fetch_top_stocks_universe`)
    - 使用 yfinance 抓取這些股票的歷史 OHLCV 價量資料 (`YFinanceFetcher.fetch_daily_ohlcv_data`)
-   - 將 raw parquet 寫入 `data/raw/interval/{YYYY-MM-DD}/`，檔名含 `mv{日期}_top{n}` 便於與 BigQuery 表名對應（例：`mv20240115_top50_ohlcv_raw_2020-01-01_to_2024-01-01_*.parquet`），並可上傳 GCS
+   - 將 raw parquet 寫入 `data/raw/{YYYY-MM-DD}/`，檔名含 `mv{日期}_top{n}` 便於與 BigQuery 表名對應（例：`mv20240115_top50_ohlcv_raw_2020-01-01_to_2024-01-01_*.parquet`），並可上傳 GCS
 2. **Transformation**
    - 使用 `Transformer.process_ohlcv_data` 清洗 OHLCV long format
-   - 補齊缺失值、計算 `daily_return`，輸出 parquet 至 `data/processed/interval/{YYYY-MM-DD}/`（檔名含 `mv{日期}_top{n}`，例：`fact_price_ohlcv_mv20240115_top50_2020-01-01_to_2024-01-01_*.parquet`）
-   - 上傳 processed 檔到 GCS `data/processed/interval/{YYYY-MM-DD}/`
+   - 補齊缺失值、計算 `daily_return`，輸出 parquet 至 `data/processed/{YYYY-MM-DD}/`（檔名含 `mv{日期}_top{n}`，例：`fact_price_ohlcv_mv20240115_top50_2020-01-01_to_2024-01-01_*.parquet`）
+   - 上傳 processed 檔到 GCS `data/processed/{YYYY-MM-DD}/`
 3. **Loading**
    - 寫入 BigQuery（使用 upsert，避免重複列）
-     - `{dataset}_interval.fact_price_mv{market_value_date}_s{start}_e{end}_top{top_n}`
+     - Dataset: `{base_dataset}_s{start}_e{end}_mv{market_value_date}`（參數移至 dataset 名稱）
+     - **價量事實表**：`fact_price`（upsert）
    - 同時寫入：
-     - **universe**（含 `delist_date` 若 FinLab 有）：`dim_universe_mv{date}_top{n}`
+     - **universe**（含 `delist_date` 若 FinLab 有）：`dim_universe`（truncate）
      - **交易日曆**（由價量日期產生）：`dim_calendar`（除非 `--skip-calendar`）
      - **基準指數**（加權等）：`fact_benchmark_daily`（除非 `--skip-benchmark`）
      - **回測層預設參數**（手續費／稅）：`dim_backtest_config`（由 `config/settings.yaml` 的 `backtest_config`）
-     - **財報因子**（可選）：`fact_factor*`（需 `--with-factors` 且設定 `factors.factor_names`）
+     - **財報因子**（可選）：`fact_factor` 或 `fact_factor_{suffix}`（需 `--with-factors` 且設定 `factors.factor_names`）
 
 ---
 
@@ -322,11 +323,11 @@ python -m scripts.run_etl_pipeline \
 ```
 
 - 會以 2024-01-15 的市值排名產生固定 universe，寫入  
-  `{dataset}_interval.dim_universe_mv2024-01-15_top50`
+  `{base_dataset}_s20200101_e20240101_mv20240115.dim_universe`
 - 同一批股票在 2020-01-01 ~ 2024-01-01 的 OHLCV + `daily_return`，寫入  
-  `{dataset}_interval.fact_price_mv20240115_s20200101_e20240101_top50`
+  `{base_dataset}_s20200101_e20240101_mv20240115.fact_price`
 
-> **建議**：因子分析 / 回測時，使用 `fact_price_*` + `dim_universe_*`，可減少生存者偏誤並確保結果可重現。
+> **建議**：因子分析 / 回測時，使用 `fact_price` + `dim_universe`（位於相同 dataset `{base}_s{start}_e{end}_mv{date}`），可減少生存者偏誤並確保結果可重現。不同參數組合會有不同 dataset，避免資料覆蓋。
 
 ---
 

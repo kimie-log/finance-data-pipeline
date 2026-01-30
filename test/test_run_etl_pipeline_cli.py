@@ -176,9 +176,9 @@ def test_skip_gcs_does_not_upload():
 
 def test_gcs_upload_paths_interval():
     """
-    驗證 interval 模式上傳到 GCS 的路徑：data/raw/interval/ 與 data/processed/interval/。
+    驗證 interval 模式上傳到 GCS 的路徑：data/raw/{date}/ 與 data/processed/{date}/。
 
-    實務：路徑結構對齊資料湖分層（raw / processed）與模式（interval），便於管理與查詢。
+    實務：路徑結構對齊資料湖分層（raw / processed）與日期資料夾，便於管理與查詢。
     """
     params = {
         "market_value_dates": ["2024-01-15"],
@@ -234,13 +234,15 @@ def test_gcs_upload_paths_interval():
                                             assert result == 0
                                             assert mock_upload.call_count == 2
                                             raw_call, processed_call = mock_upload.call_args_list
-                                            assert "data/raw/interval/" in raw_call.args[2]
-                                            assert "data/processed/interval/" in processed_call.args[2]
+                                            assert "data/raw/" in raw_call.args[2]
+                                            assert "data/processed/" in processed_call.args[2]
+                                            assert "/interval/" not in raw_call.args[2]
+                                            assert "/interval/" not in processed_call.args[2]
 
 
 def test_gcs_upload_paths_interval_mode():
     """
-    驗證 interval 模式 GCS 上傳路徑（與 test_gcs_upload_paths_interval 重複，可考慮合併）。
+    驗證 interval 模式 GCS 上傳路徑：data/raw/{date}/ 與 data/processed/{date}/（與 test_gcs_upload_paths_interval 重複，可考慮合併）。
 
     實務：確保路徑結構一致，raw 與 processed 分別上傳到對應目錄。
     """
@@ -298,15 +300,17 @@ def test_gcs_upload_paths_interval_mode():
                                             assert result == 0
                                             assert mock_upload.call_count == 2
                                             raw_call, processed_call = mock_upload.call_args_list
-                                            assert "data/raw/interval/" in raw_call.args[2]
-                                            assert "data/processed/interval/" in processed_call.args[2]
+                                            assert "data/raw/" in raw_call.args[2]
+                                            assert "data/processed/" in processed_call.args[2]
+                                            assert "/interval/" not in raw_call.args[2]
+                                            assert "/interval/" not in processed_call.args[2]
 
 
 def test_bigquery_naming_interval_mode():
     """
-    驗證 interval 模式的 BigQuery 命名規則：dataset_interval、fact_price_mv{date}_s{start}_e{end}_top{n}。
+    驗證 interval 模式的 BigQuery 命名規則：dataset_s{start}_e{end}_mv{date}、表名簡化（fact_price、dim_universe）。
 
-    實務：表名含市值日、區間、top_n，便於識別與查詢；dataset 後綴 _interval 區分不同模式。
+    實務：參數移至 dataset 名稱，表名簡化；不同參數組合會有不同 dataset，避免覆蓋問題。
     """
     params = {
         "market_value_dates": ["2024-01-15"],
@@ -363,16 +367,10 @@ def test_bigquery_naming_interval_mode():
                                         fact_call, universe_call = mock_bq.call_args_list
                                         _, fact_kwargs = fact_call
                                         _, uni_kwargs = universe_call
-                                        assert fact_kwargs["dataset_id"] == "my_dataset_interval"
-                                        assert (
-                                            fact_kwargs["table_id"]
-                                            == "fact_price_mv20240115_s20200101_e20240101_top30"
-                                        )
-                                        assert uni_kwargs["dataset_id"] == "my_dataset_interval"
-                                        assert (
-                                            uni_kwargs["table_id"]
-                                            == "dim_universe_mv20240115_top30"
-                                        )
+                                        assert fact_kwargs["dataset_id"] == "my_dataset_s20200101_e20240101_mv20240115"
+                                        assert fact_kwargs["table_id"] == "fact_price"
+                                        assert uni_kwargs["dataset_id"] == "my_dataset_s20200101_e20240101_mv20240115"
+                                        assert uni_kwargs["table_id"] == "dim_universe"
 
 
 def test_interval_filenames_include_date_range():

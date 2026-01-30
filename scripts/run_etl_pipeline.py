@@ -6,7 +6,7 @@ ETL Pipeline 主腳本：台股價量與因子資料抓取、轉換、寫入 Big
     對每個市值日執行 Ingestion（FinLab universe + yfinance OHLCV）→ 
     Transformation（Transformer.process_ohlcv_data）→ 
     Loading（BigQuery fact_price、dim_universe、dim_calendar、fact_benchmark_daily、dim_backtest_config、可選 fact_factor）→
-    本地 parquet 寫入 data/raw/interval、data/processed/interval，可選上傳 GCS
+    本地 parquet 寫入 data/raw/{date}、data/processed/{date}，可選上傳 GCS
 
 依賴：
     .env（FINLAB_API_TOKEN、GCP_PROJECT_ID、GCS_BUCKET）
@@ -66,8 +66,8 @@ def main() -> int:
         logger.error("請提供 --market-value-date 或 --market-value-dates，且 --start、--end 皆為必填。")
         return 1
 
-    raw_dir = ROOT_DIR / "data/raw" / "interval" / date_folder
-    processed_dir = ROOT_DIR / "data/processed" / "interval" / date_folder
+    raw_dir = ROOT_DIR / "data/raw" / date_folder
+    processed_dir = ROOT_DIR / "data/processed" / date_folder
     raw_dir.mkdir(parents=True, exist_ok=True)
     processed_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,7 +123,7 @@ def main() -> int:
                 upload_file(
                     bucket_name,
                     raw_local_path,
-                    f"data/raw/interval/{date_folder}/{raw_filename}",
+                    f"data/raw/{date_folder}/{raw_filename}",
                 )
 
         except Exception as e:
@@ -160,7 +160,7 @@ def main() -> int:
                 upload_file(
                     bucket_name,
                     processed_path,
-                    f"data/processed/interval/{date_folder}/{processed_path.name}",
+                    f"data/processed/{date_folder}/{processed_path.name}",
                 )
 
             logger.info(f"Transformation Success! Saved to: {processed_path.name}")
@@ -177,23 +177,22 @@ def main() -> int:
             mv_date_bq = params["market_value_date"].replace("-", "")
             start_tag = params["start_date"].replace("-", "")
             end_tag = params["end_date"].replace("-", "")
-            target_dataset = f"{bq_dataset}_interval"
-            target_table = f"fact_price_mv{mv_date_bq}_s{start_tag}_e{end_tag}_top{top_n}"
+            # Dataset 名稱含所有參數：{base_dataset}_s{start}_e{end}_mv{market_value_date}
+            target_dataset = f"{bq_dataset}_s{start_tag}_e{end_tag}_mv{mv_date_bq}"
 
-            # 價量事實表：upsert 避免重複列，支援重跑
+            # 價量事實表：表名簡化為 fact_price（參數已在 dataset 名稱中）
             load_to_bigquery(
                 df=df_cleaned_price,
                 dataset_id=target_dataset,
-                table_id=target_table,
+                table_id="fact_price",
                 if_exists="upsert",
             )
 
-            # Universe 維度表：該市值日 Top N 清單，truncate 覆寫
-            universe_table = f"dim_universe_mv{mv_date_bq}_top{top_n}"
+            # Universe 維度表：表名簡化為 dim_universe（參數已在 dataset 名稱中）
             load_to_bigquery(
                 df=universe_df,
                 dataset_id=target_dataset,
-                table_id=universe_table,
+                table_id="dim_universe",
                 if_exists="truncate",
             )
 
@@ -250,7 +249,8 @@ def main() -> int:
                 )
                 if not df_factor.empty:
                     suffix = params.get("factor_table_suffix")
-                    factor_table = f"fact_factor_mv{mv_date_bq}_s{start_tag}_e{end_tag}_top{top_n}"
+                    # 因子表名簡化為 fact_factor（參數已在 dataset 名稱中），可加 suffix 並存多組
+                    factor_table = "fact_factor"
                     if suffix:
                         factor_table = f"{factor_table}_{suffix}"
                     load_to_bigquery(
