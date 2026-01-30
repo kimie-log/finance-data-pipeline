@@ -102,9 +102,8 @@
 - **日誌**：logger 支援 LOG_LEVEL / LOG_DIR，輸出到 console 與輪替檔案。
 - **重試**：`utils/retry.py` 通用重試（指數退避 + jitter）。
 - **測試**：pytest 涵蓋 FinLab、yfinance、transformer、CLI、GCS、BigQuery、retry 等。
-- **CI**：GitHub Actions 在 push/PR 時跑 `pytest`（多版 Python）。
 
-**一句話**：專案可依「固定市值日 + 區間」跑完整 ETL，產出可重現回測用的價量、universe、交易日曆、基準、回測參數，並可選寫入財報因子；程式內可做因子取得、季頻→日頻展開、單／多因子加權排名；透過 CLI 與設定檔控制選股與輸出，並以 GCS + BigQuery 為資料湖與倉儲，搭配測試與 CI 維持品質。
+**一句話**：專案可依「固定市值日 + 區間」跑完整 ETL，產出可重現回測用的價量、universe、交易日曆、基準、回測參數，並可選寫入財報因子；程式內可做因子取得、季頻→日頻展開、單／多因子加權排名；透過 CLI 與設定檔控制選股與輸出，並以 GCS + BigQuery 為資料湖與倉儲，搭配測試維持品質。
 
 ---
 
@@ -328,17 +327,6 @@ python -m scripts.run_etl_pipeline \
   `{base_dataset}_s20200101_e20240101_mv20240115.fact_price`
 
 > **建議**：因子分析 / 回測時，使用 `fact_price` + `dim_universe`（位於相同 dataset `{base}_s{start}_e{end}_mv{date}`），可減少生存者偏誤並確保結果可重現。不同參數組合會有不同 dataset，避免資料覆蓋。
-
----
-
-### CI Pipeline
-
-本專案使用 GitHub Actions 執行 CI：
-- 結果頁面：https://github.com/kimie-log/finance-data-pipeline/actions/workflows/ci.yml
-- 設定檔：`.github/workflows/ci.yml`
-- 觸發條件：`main` 分支 push 與 PR
-- 內容：安裝依賴後執行 `python -m pytest -q`
-- 支援版本：Python 3.10 / 3.11 / 3.12 / 3.13 / 3.14
 
 ---
 
