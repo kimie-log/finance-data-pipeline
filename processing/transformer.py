@@ -4,57 +4,92 @@ import gc
 from typing import Annotated
 from utils.logger import logger
 
+
 class Transformer:
     @staticmethod
-    def process_market_data(
-        df_raw: Annotated[pd.DataFrame, "yfinance 抓取的原始股價資料 (wide format)"]
-    ) -> Annotated[pd.DataFrame, "處理後的市場資料 (long format)"]:
+    def process_ohlcv_data(
+        df_raw: Annotated[
+            pd.DataFrame,
+            "yfinance 抓取的原始 OHLCV 價量資料 (long format)",
+        ]
+    ) -> Annotated[
+        pd.DataFrame,
+        "處理後的 OHLCV 市場資料 (long format, 含 daily_return)",
+    ]:
         '''
         函式說明：
-        市場資料轉換：將 wide format 轉成 long format 並計算報酬率
+        將 OHLCV 價量資料整理為 fact table 需要的結構：
+        - 正規化欄位名稱與型別
+        - 依股票與日期排序
+        - 計算日報酬率 daily_return
         '''
 
-        # 記錄輸入規模，方便監控資料量變化與性能
-        logger.info(f"Starting transformation. Input shape: {df_raw.shape}")
+        logger.info(f"Starting OHLCV transformation. Input shape: {df_raw.shape}")
 
-        # 1. Wide to Long：把日期索引拉成欄位，符合後續資料倉儲 schema
-        df = df_raw.reset_index().rename(columns={'Date': 'date', 'index': 'date'})
-        df_melted = df.melt(id_vars=['date'], var_name='stock_id', value_name='close')
-        
-        # 釋放原始巨大的 wide dataframe，避免記憶體暴增
-        del df, df_raw
-        gc.collect()
+        df = df_raw.copy()
 
-        # 2. 型別轉換與優化 (float64 -> float32)： 降低記憶體使用
-        df_melted['date'] = pd.to_datetime(df_melted['date'])
-        df_melted['close'] = pd.to_numeric(df_melted['close'], errors='coerce').astype(np.float32)
-        df_melted['stock_id'] = df_melted['stock_id'].astype(str)
-        
-        # 3. 排序 (為 FFill 做準備)：確保同股序列時間連續
-        df_melted.sort_values(by=['stock_id', 'date'], inplace=True, ignore_index=True)
+        # 欄位標準化：datetime -> date, asset -> stock_id
+        df.rename(columns={"datetime": "date", "asset": "stock_id"}, inplace=True)
 
-        # 4. 處理缺失值
-        # 使用 groupby ffill：這是最佔記憶體的步驟，需要特別注意
-        df_melted['close'] = df_melted.groupby('stock_id', sort=False)['close'].ffill()
-        # 若仍為 NaN，代表該股票在該段期間無有效收盤價
-        df_melted.dropna(subset=['close'], inplace=True)
+        # 型別與排序處理
+        df["date"] = pd.to_datetime(df["date"])
+        df["stock_id"] = df["stock_id"].astype(str)
 
-        # 5. 計算 Daily Return (同樣使用 float32)
-        # 分組後計算日報酬：為後續分析提供基礎指標
-        df_melted['daily_return'] = (
-            df_melted.groupby('stock_id', sort=False)['close']
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # 依股票與時間排序，方便 groupby 計算
+        df.sort_values(by=["stock_id", "date"], inplace=True, ignore_index=True)
+
+        # 補齊缺失值：價格欄位以前值補齊，volume 缺失視為 0
+        price_cols = ["open", "high", "low", "close"]
+        df[price_cols] = df.groupby("stock_id", sort=False)[price_cols].ffill()
+        df["volume"] = df["volume"].fillna(0)
+
+        # 移除仍為 NaN 的 close（代表該股票整段無有效資料）
+        df.dropna(subset=["close"], inplace=True)
+
+        # 計算日報酬率：以收盤價為基準
+        df["daily_return"] = (
+            df.groupby("stock_id", sort=False)["close"]
             .pct_change()
             .astype(np.float32)
         )
 
-        # 6. 最終整理
-        # 保留 fact table 需要的欄位：避免不必要的記憶體占用
-        final_df = df_melted[['date', 'stock_id', 'close', 'daily_return']].copy()
-        
-        # 釋放中間表：降低峰值記憶體使用
-        del df_melted
+        # 交易可行性標記：無外部來源時以簡單啟發式標記（volume=0 且 OHLC 同價視為可能停牌／漲跌停）
+        df["is_suspended"] = 0
+        df["is_limit_up"] = 0
+        df["is_limit_down"] = 0
+        mask_same = (df["volume"] == 0) & (df["open"] == df["close"]) & (df["high"] == df["low"])
+        if mask_same.any():
+            prev_close = df.groupby("stock_id", sort=False)["close"].shift(1)
+            df.loc[mask_same & (df["close"] > prev_close), "is_limit_up"] = 1
+            df.loc[mask_same & (df["close"] < prev_close), "is_limit_down"] = 1
+            df.loc[mask_same & (df["close"] == prev_close), "is_suspended"] = 1
+
+        # 最終欄位順序
+        final_cols = [
+            "date",
+            "stock_id",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "daily_return",
+            "is_suspended",
+            "is_limit_up",
+            "is_limit_down",
+        ]
+        final_df = df[final_cols].copy()
+
+        logger.info(
+            "OHLCV Market Data Transformed. Final Memory Usage: %.2f MB",
+            final_df.memory_usage().sum() / 1024**2,
+        )
+
+        # 釋放中間物件
+        del df
         gc.collect()
-        
-        # 紀錄轉換後的記憶體用量：便於容量規劃
-        logger.info(f"Market Data Transformed. Final Memory Usage: {final_df.memory_usage().sum() / 1024**2:.2f} MB")
+
         return final_df

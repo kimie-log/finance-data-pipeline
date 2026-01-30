@@ -1,5 +1,7 @@
+import io
 import os
 import gc
+import numpy as np
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
 from google.api_core import exceptions as gcp_exceptions
@@ -18,6 +20,23 @@ def load_to_bigquery(
     函數說明：
     使用 暫存表 + MERGE 的方式將 DataFrame 上傳到 BigQuery，支援 Upsert 功能
     """
+    # 避免 pd.NA / NaT 導致 load_table_from_dataframe 轉 PyArrow 時出錯（arg must be a list, tuple, 1-d array, or Series）
+    df = df.replace({pd.NA: None, pd.NaT: None}).copy()
+    # object 欄位：缺值改 None，非純量（list/dict 等）轉字串，確保每欄為單純 1-d 純量序列
+    for col in df.columns:
+        if df[col].dtype == object:
+            def _scalarize(x):
+                if pd.isna(x) or x is None:
+                    return None
+                if isinstance(x, (list, dict)):
+                    return str(x)
+                return x
+            df[col] = df[col].map(_scalarize)
+    # 全為 None 的 object 欄位改空字串，避免 PyArrow 推斷 schema 時失敗
+    for col in df.columns:
+        if df[col].dtype == object and df[col].isna().all():
+            df[col] = ""
+
     # BigQuery 常見可重試錯誤，集中管理便於統一處理
     retryable_exceptions = (
         gcp_exceptions.ServiceUnavailable,
@@ -60,15 +79,48 @@ def load_to_bigquery(
             )
             logger.info("Created dataset: %s", dataset_id)
 
-        # 如果使用者只想簡單 append 或 truncate
+        # 如果使用者只想簡單 append 或 truncate：改走 Parquet 再載入，避免 load_table_from_dataframe 轉換 object 欄位時出錯
         if if_exists != 'upsert':
-            # 依 write_disposition 寫入資料
-            job_config = bigquery.LoadJobConfig(write_disposition=f"WRITE_{if_exists.upper()}")
+            # 欄位名正規化為字串（BigQuery 不接受 tuple 如 ('date','')），重複時加後綴
+            def _col_name(c):
+                return c[0] if isinstance(c, tuple) else str(c)
+
+            seen = {}
+            def _unique_key(col):
+                k = _col_name(col)
+                if k in seen:
+                    seen[k] += 1
+                    return f"{k}_{seen[k]}"
+                seen[k] = 0
+                return k
+
+            # 從純 Python list 重建 DataFrame，確保每欄為 1-d 序列，避免 "arg must be a list, tuple, 1-d array, or Series"
+            data = {}
+            for col in df.columns:
+                key = _unique_key(col)
+                if df[col].dtype == object:
+                    data[key] = ["" if (x is None or pd.isna(x)) else str(x) for x in df[col]]
+                elif pd.api.types.is_datetime64_any_dtype(df[col]):
+                    s = pd.to_datetime(df[col], errors="coerce")
+                    data[key] = [(x.strftime("%Y-%m-%d") if pd.notna(x) else "") for x in s]
+                else:
+                    data[key] = df[col].tolist()
+            _df = pd.DataFrame(data)
+            job_config = bigquery.LoadJobConfig(
+                write_disposition=f"WRITE_{if_exists.upper()}",
+                source_format=bigquery.SourceFormat.PARQUET,
+            )
+            table_ref = dataset_ref.table(table_id)
+
+            def _write_and_load():
+                buf = io.BytesIO()
+                _df.to_parquet(buf, index=False, engine="pyarrow")
+                buf.seek(0)
+                return client.load_table_from_file(buf, table_ref, job_config=job_config).result()
+
             run_with_retry(
-                lambda: client.load_table_from_dataframe(
-                    df, dataset_ref.table(table_id), job_config=job_config
-                ).result(),
-                action_name=f"BigQuery load {dataset_id}.{table_id}",
+                _write_and_load,
+                action_name=f"BigQuery load {dataset_id}.{table_id} (parquet)",
                 retry_exceptions=retryable_exceptions,
             )
             return
@@ -90,16 +142,25 @@ def load_to_bigquery(
         )
 
         # 執行 MERGE SQL
-        # 主鍵是 date 和 stock_id
+        # 主鍵是 date 和 stock_id，更新 OHLCV、daily_return、交易可行性欄位
         merge_sql = f"""
         MERGE `{project_id}.{dataset_id}.{table_id}` T
         USING `{project_id}.{dataset_id}.{staging_table_id}` S
         ON T.date = S.date AND T.stock_id = S.stock_id
         WHEN MATCHED THEN
-            UPDATE SET close = S.close, daily_return = S.daily_return
+            UPDATE SET
+                T.open = S.open,
+                T.high = S.high,
+                T.low = S.low,
+                T.close = S.close,
+                T.volume = S.volume,
+                T.daily_return = S.daily_return,
+                T.is_suspended = S.is_suspended,
+                T.is_limit_up = S.is_limit_up,
+                T.is_limit_down = S.is_limit_down
         WHEN NOT MATCHED THEN
-            INSERT (date, stock_id, close, daily_return) 
-            VALUES (date, stock_id, close, daily_return)
+            INSERT (date, stock_id, open, high, low, close, volume, daily_return, is_suspended, is_limit_up, is_limit_down)
+            VALUES (S.date, S.stock_id, S.open, S.high, S.low, S.close, S.volume, S.daily_return, S.is_suspended, S.is_limit_up, S.is_limit_down)
         """
         
         # 檢查目標表是否存在，不存在則直接從暫存表建立
@@ -117,10 +178,16 @@ def load_to_bigquery(
             )
             logger.info("Upsert completed for %s", table_id)
         except NotFound:
-            # 如果目標表根本不存在，直接把暫存表重新命名或複製過去
+            # 如果目標表根本不存在，直接把暫存表複製過去（單一 source，須指定 location 與 dataset 一致）
             logger.info("Target table %s not found, creating from staging...", table_id)
+            job_config = bigquery.CopyJobConfig(write_disposition="WRITE_TRUNCATE")
             run_with_retry(
-                lambda: client.copy_table(staging_table_ref, target_table_ref).result(),
+                lambda: client.copy_table(
+                    staging_table_ref,
+                    target_table_ref,
+                    job_config=job_config,
+                    location="asia-east1",
+                ).result(),
                 action_name=f"BigQuery copy {dataset_id}.{staging_table_id} -> {table_id}",
                 retry_exceptions=retryable_exceptions,
             )

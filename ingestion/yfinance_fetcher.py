@@ -6,83 +6,88 @@ from typing import Annotated, List
 封裝 yfinance 抓取行為，集中處理欄位清洗與格式統一
 '''
 
+
 class YFinanceFetcher:
     @staticmethod
-    def fetch(ticker, start, end):
-        '''
-        簡易抓取接口，提供快速取單一標的需求
-        '''
-        df = yf.download(ticker, start=start, end=end)
-        return df
-
-    @staticmethod
-    def fetch_daily_close_prices(
+    def fetch_daily_ohlcv_data(
         stock_symbols: Annotated[List[str], "股票代碼列表"],
         start_date: Annotated[str, "起始日期", "YYYY-MM-DD"],
-        end_date: Annotated[str, "結束日期", "YYYY-MM-DD"] | None,
+        end_date: Annotated[str, "結束日期", "YYYY-MM-DD"],
         is_tw_stock: Annotated[bool, "stock_symbols 是否是台灣股票"] = True,
     ) -> Annotated[
         pd.DataFrame,
-        "每日股票收盤價資料表",
-        "索引是日期(DatetimeIndex格式)",
-        "欄位名稱為純股票代碼 (去除後綴)",
+        "價量資料表 (long format)",
+        "欄位包含 datetime, asset, open, high, low, close, volume",
     ]:
         '''
         函式說明：
-        取得多支股票在指定日期區間的每日收盤價資料
+        取得指定股票在給定日期範圍內的每日 OHLCV 價量資料（long format）
         '''
-
-        print(f"Downloading yfinance data for {len(stock_symbols)} tickers...")
-
-        # 如果是台灣股票，則在每個股票代碼後加上 ".TW"
+        # 若為台股，自動補上 .TW 後綴，與 close-only 版本一致
+        tickers = stock_symbols
         if is_tw_stock:
-            stock_symbols = [
+            tickers = [
                 f"{symbol}.TW" if ".TW" not in symbol else symbol
                 for symbol in stock_symbols
             ]
-            
-        # 1. 下載資料 (不再修改 stock_symbols，完全信任傳入的列表)
-        # auto_adjust=True 會自動處理除權息價格，對回測較方便，若需原始價格可設為 False
-        stock_data = yf.download(stock_symbols, start=start_date, end=end_date, auto_adjust=True)
 
-        # 2. 處理資料結構 (只取 Close)
-        # 先處理單支股票 Series，避免直接存取 .columns 造成錯誤
-        if isinstance(stock_data, pd.Series):
-            # 單檔資料統一轉為 DataFrame，確保後續流程一致
-            stock_data = stock_data.to_frame()
-            stock_data.columns = stock_symbols
-        else:
-            # yfinance 下載多檔股票，columns 為 MultiIndex (Price, Ticker)
-            if isinstance(stock_data.columns, pd.MultiIndex):
-                try:
-                    # 優先取 Close 並 使用防呆處理確保取到收盤價
-                    target_col = "Close" if "Close" in stock_data.columns.levels[0] else stock_data.columns.levels[0][0]
-                    stock_data = stock_data[target_col]
-                except Exception as e:
-                    # 若結構異常則直接回傳空表，避免錯誤影響整條 pipeline
-                    print(f"Error extracting Close price: {e}")
-                    return pd.DataFrame()
-            elif "Close" in stock_data.columns:
-                # 單層欄位時直接擷取 Close
-                stock_data = stock_data["Close"]
+        all_stock_data = pd.concat(
+            [
+                pd.DataFrame(
+                    yf.download(symbol, start=start_date, end=end_date, auto_adjust=True)
+                )
+                # yfinance 對單一 ticker 會用 MultiIndex columns (欄位, Ticker)，先移除 Ticker 層
+                .droplevel("Ticker", axis=1)
+                # 加上 asset 欄位（不含 .TW 後綴）
+                .assign(asset=symbol.split(".")[0])
+                .reset_index()
+                .rename(columns={"Date": "datetime"})
+                .ffill()
+                for symbol in tickers
+            ],
+            ignore_index=True,
+        )
 
-            # 3. 處理單支股票的特殊情況 (Series -> DataFrame)
-            if isinstance(stock_data, pd.Series):
-                # yfinance 在單檔時可能回傳 Series，再次補上轉表
-                stock_data = stock_data.to_frame()
-                stock_data.columns = stock_symbols
+        # 保留並重新命名欄位，統一為小寫英文字以利 BigQuery 與後續處理
+        all_stock_data = all_stock_data[
+            ["Open", "High", "Low", "Close", "Volume", "datetime", "asset"]
+        ]
+        all_stock_data.columns = [
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "datetime",
+            "asset",
+        ]
 
-        # 4. 處理缺失值 (Forward Fill)
-        # 交易日缺漏時使用前值補齊，讓報酬率計算更穩定
-        stock_data = stock_data.ffill()
+        return all_stock_data.reset_index(drop=True)
 
-        # 5. 移除全空的欄位 (避免下載失敗的股票佔用欄位)
-        stock_data = stock_data.dropna(axis=1, how='all')
+    @staticmethod
+    def fetch_benchmark_daily(
+        index_ids: Annotated[List[str], "指數代碼列表，如 ^TWII"],
+        start_date: Annotated[str, "起始日期", "YYYY-MM-DD"],
+        end_date: Annotated[str, "結束日期", "YYYY-MM-DD"],
+    ) -> Annotated[
+        pd.DataFrame,
+        "欄位: date, index_id, close, daily_return",
+    ]:
+        """抓取基準指數日收盤與日報酬，供回測層使用。"""
+        out = []
+        for idx_id in index_ids:
+            raw = yf.download(idx_id, start=start_date, end=end_date, auto_adjust=True)
+            if raw.empty:
+                continue
+            raw = raw.reset_index().rename(columns={"Date": "date"})
+            raw["index_id"] = idx_id.lstrip("^")
+            # yf.download 單一 ticker 時可能回傳 MultiIndex 欄位，raw["Close"] 變 2-d，pd.to_numeric 須收 1-d
+            close_col = raw["Close"]
+            close_1d = close_col.squeeze() if isinstance(close_col, pd.DataFrame) else close_col
+            raw["close"] = pd.to_numeric(close_1d, errors="coerce")
+            raw["daily_return"] = raw["close"].pct_change()
+            out.append(raw[["date", "index_id", "close", "daily_return"]])
+        if not out:
+            return pd.DataFrame(columns=["date", "index_id", "close", "daily_return"])
+        return pd.concat(out, ignore_index=True)
 
-        # 6. 清洗欄位名稱
-        # 使用 Regex 同時移除結尾的 .TW (例: "2330.TW" -> "2330")，方便後續處理
-        stock_data.columns = stock_data.columns.str.replace(r'\.TW$', '', regex=True)
-
-        return stock_data
-        
-        
