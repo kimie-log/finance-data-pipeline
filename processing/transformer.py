@@ -1,7 +1,7 @@
 """
 資料轉換模組：OHLCV 清洗與交易可行性標記
 
-將 yfinance 抓取的原始價量資料轉換為 BigQuery fact_price 表所需格式，
+將 yfinance 抓取的原始價量資料轉換為 BigQuery fact_price 表所需格式
 包含欄位正規化、缺失值處理、日報酬計算與交易可行性標記（停牌、漲跌停）
 產出欄位與型別對齊後續 BigQuery 寫入與回測需求
 """
@@ -76,10 +76,12 @@ class Transformer:
             .astype(np.float32)
         )
 
+        # 交易可行性標記：volume=0 且 OHLC 同價時判斷停牌／漲跌停
         df["is_suspended"] = 0
         df["is_limit_up"] = 0
         df["is_limit_down"] = 0
         mask_same = (df["volume"] == 0) & (df["open"] == df["close"]) & (df["high"] == df["low"])
+        # 若 mask_same 有任何 True，則計算前一日收盤價
         if mask_same.any():
             prev_close = df.groupby("stock_id", sort=False)["close"].shift(1)
             df.loc[mask_same & (df["close"] > prev_close), "is_limit_up"] = 1

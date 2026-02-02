@@ -4,9 +4,6 @@ pytest 設定檔：測試共用工具與 hook。
 提供模組依賴檢查（require_module、require_any_module）與測試結果輸出格式（pytest_terminal_summary）。
 確保專案根目錄在 sys.path 中，測試可直接 import 專案模組。
 """
-'''
- TODO: 修改 test 分類方式
-'''
 
 import importlib
 import sys

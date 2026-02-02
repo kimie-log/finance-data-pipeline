@@ -155,8 +155,7 @@ def resolve_params(config: dict, args: argparse.Namespace, root_dir: Optional[Pa
     Returns:
         合併後的參數 dict，包含 market_value_dates、market_value_date、start_date、end_date、
         top_n、excluded_industry、pre_list_date、dataset_id、skip_gcs、with_factors、
-        factor_names、benchmark_index_ids、backtest_config、skip_benchmark、skip_calendar、
-        factor_table_suffix。
+        factor_names、benchmark_index_ids、skip_benchmark、skip_calendar、factor_table_suffix。
 
     Note:
         - market_value_dates 為列表（單一日期時為 [date]），market_value_date 為第一個元素。
@@ -201,7 +200,6 @@ def resolve_params(config: dict, args: argparse.Namespace, root_dir: Optional[Pa
 
     factors_cfg = etl_cfg.get("factors", {})
     benchmark_cfg = etl_cfg.get("benchmark", {})
-    backtest_cfg = etl_cfg.get("backtest_config", {})
 
     # 布林旗標：有加該參數則用 True，未加則用 config.etl
     skip_gcs = args.skip_gcs if args.skip_gcs else etl_cfg.get("skip_gcs", False)
@@ -239,7 +237,6 @@ def resolve_params(config: dict, args: argparse.Namespace, root_dir: Optional[Pa
         "with_factors": with_factors,
         "factor_names": factor_names,
         "benchmark_index_ids": benchmark_cfg.get("index_ids", ["^TWII"]),
-        "backtest_config": backtest_cfg,
         "skip_benchmark": skip_benchmark,
         "skip_calendar": skip_calendar,
         "factor_table_suffix": factor_table_suffix,
@@ -310,8 +307,8 @@ def resolve_multi_factor_backtest_params(config: dict, args: argparse.Namespace)
     合併設定檔與 CLI 參數（多因子回測）：預設使用 config.multi_factor_backtest，CLI 有傳則覆寫。
 
     Returns:
-        合併後的參數 dict：dataset, factors, start, end, weights, local_price, local_factor,
-        factor_table, positive_corr, buy_n, sell_n, initial_cash, commission。
+        合併後的參數 dict：dataset, factors, start, end, weights, quarterly_factors, local_price, local_factor,
+        factor_table, positive_corr, buy_n, sell_n, initial_cash, commission, skip_gcs。
     """
     cfg = config.get("multi_factor_backtest", {})
 
@@ -337,6 +334,7 @@ def resolve_multi_factor_backtest_params(config: dict, args: argparse.Namespace)
         "start": getattr(args, "start", None) or cfg.get("start"),
         "end": getattr(args, "end", None) or cfg.get("end"),
         "weights": weights,
+        "quarterly_factors": cfg.get("quarterly_factors"),  
         "local_price": getattr(args, "local_price", None) or cfg.get("local_price"),
         "local_factor": getattr(args, "local_factor", None) or cfg.get("local_factor"),
         "auto_find_local": getattr(args, "auto_find_local", False) or cfg.get("auto_find_local", False),
@@ -346,4 +344,5 @@ def resolve_multi_factor_backtest_params(config: dict, args: argparse.Namespace)
         "sell_n": getattr(args, "sell_n", None) if getattr(args, "sell_n", None) is not None else (cfg.get("sell_n") if cfg.get("sell_n") is not None else 20),
         "initial_cash": getattr(args, "initial_cash", None) if getattr(args, "initial_cash", None) is not None else (cfg.get("initial_cash") if cfg.get("initial_cash") is not None else 20_000_000),
         "commission": getattr(args, "commission", None) or cfg.get("commission") or 0.001,
+        "skip_gcs": getattr(args, "skip_gcs", False) or cfg.get("skip_gcs", False),
     }

@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import warnings
 from datetime import datetime
@@ -59,6 +60,7 @@ from factors.factor_ranking import FactorRanking
 from factors.finlab_factor_fetcher import FinLabFactorFetcher
 from utils.cli import load_config, resolve_multi_factor_backtest_params
 from utils.data_loader import load_factor_data, load_price_data
+from utils.google_cloud_storage import upload_file
 from utils.logger import logger
 
 
@@ -118,6 +120,7 @@ def run_multi_factor_backtest(
     start_date: str,
     end_date: str,
     weights: list[float] | None = None,
+    quarterly_factors: dict[str, list[dict[str, any]]] | None = None,
     local_price_path: str | None = None,
     local_factor_path: str | None = None,
     factor_table: str = "fact_factor",
@@ -127,7 +130,16 @@ def run_multi_factor_backtest(
     initial_cash: float = 20_000_000,
     commission: float = 0.001,
     auto_find_local: bool = False,
+    skip_gcs: bool = False,
 ) -> None:
+    """
+    執行多因子回測。
+
+    Args:
+        quarterly_factors: 季度因子設定字典，格式 { "YYYY-Qn": [{"name": "因子名", "weight": 0.2}, ...], ... }。
+            若指定，則每季使用該季度的因子與權重；未在字典中的季度則使用 factors 與 weights。
+            若為 None，則所有季度使用統一的 factors 與 weights。
+    """
     if not factors:
         raise ValueError("至少需指定一個因子")
     n = len(factors)
@@ -135,6 +147,16 @@ def run_multi_factor_backtest(
         weights = [1.0 / n] * n
     if len(weights) != n:
         raise ValueError("weights 長度須與 factors 相同")
+
+    # 如果有季度設定，收集所有會用到的因子名稱
+    if quarterly_factors:
+        all_factors_set = set(factors)
+        for quarter_factors in quarterly_factors.values():
+            for f in quarter_factors:
+                all_factors_set.add(f["name"])
+        all_factors_list = list(all_factors_set)
+    else:
+        all_factors_list = factors
 
     if auto_find_local:
         if not local_price_path:
@@ -169,7 +191,7 @@ def run_multi_factor_backtest(
     # 先取得全區間各因子資料（供每季切片）
     trading_days = pd.date_range(start=start_date, end=end_date)
     rank_factors_data_dict = {}
-    for factor_name in factors:
+    for factor_name in all_factors_list:
         df_f = load_factor_data(
             dataset_id=dataset_id,
             factor_name=factor_name,
@@ -200,18 +222,48 @@ def run_multi_factor_backtest(
     all_factor_data = []
     for quarter in quarters:
         q_start, q_end = FinLabFactorFetcher.convert_quarter_to_dates(quarter)
+        
+        # 決定該季度使用的因子與權重
+        if quarterly_factors and quarter in quarterly_factors:
+            # 使用季度設定中的因子與權重
+            quarter_factor_config = quarterly_factors[quarter]
+            quarter_factors_list = [f["name"] for f in quarter_factor_config]
+            quarter_weights_list = [f["weight"] for f in quarter_factor_config]
+        else:
+            # 使用預設的因子與權重
+            quarter_factors_list = factors
+            quarter_weights_list = weights
+        
+        # 取得該季度各因子的排名資料
         ranked_dfs = []
-        for factor_name in factors:
+        valid_weights = []
+        for i, factor_name in enumerate(quarter_factors_list):
+            if factor_name not in rank_factors_data_dict:
+                logger.warning(f"季度 {quarter} 的因子 {factor_name} 不在已載入的因子列表中，跳過該因子")
+                continue
             df_r = rank_factors_data_dict[factor_name]
             mask = (df_r["datetime"] >= pd.Timestamp(q_start)) & (
                 df_r["datetime"] <= pd.Timestamp(q_end)
             )
-            ranked_dfs.append(df_r.loc[mask, ["datetime", "asset", "rank"]])
-        if not all(not df.empty for df in ranked_dfs):
+            quarter_ranked = df_r.loc[mask, ["datetime", "asset", "rank"]]
+            if not quarter_ranked.empty:
+                ranked_dfs.append(quarter_ranked)
+                valid_weights.append(quarter_weights_list[i])
+        
+        if not ranked_dfs:
+            logger.warning(f"季度 {quarter} 無有效因子資料，跳過")
             continue
+        
+        if len(ranked_dfs) != len(quarter_factors_list):
+            logger.warning(
+                f"季度 {quarter} 的因子資料不完整（需要 {len(quarter_factors_list)} 個，實際 {len(ranked_dfs)} 個），"
+                f"使用現有 {len(ranked_dfs)} 個因子進行加權排名"
+            )
+        
+        # 計算該季度的加權排名（使用有效的因子與對應權重）
         quarter_weighted = FactorRanking.calculate_weighted_rank(
             ranked_dfs=ranked_dfs,
-            weights=weights,
+            weights=valid_weights,
             positive_corr=positive_corr,
             rank_column="rank",
         )
@@ -348,6 +400,27 @@ def run_multi_factor_backtest(
 
     if saved_count[0] > 0:
         logger.info(f"回測報告已保存: {report_dir}")
+        # 上傳回測報告至 GCS（結構與多因子分析報告一致）
+        if not skip_gcs:
+            bucket_name = os.getenv("GCS_BUCKET")
+            if bucket_name:
+                gcs_prefix = f"data/multi_factor_backtest_reports/{range_dir}/{folder_name}"
+                for f in report_dir.iterdir():
+                    if f.is_file():
+                        try:
+                            upload_file(
+                                bucket_name,
+                                f,
+                                f"{gcs_prefix}/{f.name}",
+                            )
+                            logger.info(f"已上傳回測報告至 GCS: {gcs_prefix}/{f.name}")
+                        except Exception as e:
+                            logger.warning(f"上傳回測報告 {f.name} 至 GCS 失敗: {e}")
+            else:
+                logger.warning("GCS_BUCKET 未設定，略過上傳回測報告至 GCS")
+    else:
+        logger.warning("未偵測到 PyFolio 產生的圖表，無回測報告可上傳")
+
     logger.info("多因子回測完成（PyFolio tear sheet 已輸出）")
 
 
@@ -381,6 +454,7 @@ def main():
     parser.add_argument("--sell-n", type=int, default=None, help="做空檔數")
     parser.add_argument("--initial-cash", type=float, default=None, help="初始資金")
     parser.add_argument("--commission", type=float, default=None, help="手續費率")
+    parser.add_argument("--skip-gcs", action="store_true", help="略過上傳回測報告至 GCS；未加則依 config.multi_factor_backtest.skip_gcs")
     args = parser.parse_args()
 
     params = resolve_multi_factor_backtest_params(config, args)
@@ -396,6 +470,7 @@ def main():
         start_date=params["start"],
         end_date=params["end"],
         weights=params["weights"],
+        quarterly_factors=params.get("quarterly_factors"),
         local_price_path=params["local_price"],
         local_factor_path=params["local_factor"],
         factor_table=params["factor_table"],
@@ -405,6 +480,7 @@ def main():
         initial_cash=params["initial_cash"],
         commission=params["commission"],
         auto_find_local=params.get("auto_find_local", False),
+        skip_gcs=params.get("skip_gcs", False),
     )
 
 

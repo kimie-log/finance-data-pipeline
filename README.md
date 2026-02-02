@@ -155,14 +155,58 @@ python -m scripts.run_multi_factor_analysis \
   --auto-find-local
 ```
 
+### 單因子分析
+
+```bash
+python -m scripts.run_single_factor_analysis \
+  --dataset tw_top_50_stock_data_s20170516_e20210515_mv20170516 \
+  --start 2017-05-16 --end 2021-05-15 \
+  --factors "營運現金流,歸屬母公司淨利"
+```
+
+- **用途**：對給定的每一個單因子，分別跑 Alphalens（分位數報酬、IC、tear sheet）。
+- **設定來源**：優先讀 `config.single_factor_analysis` 區塊；若未設定，部分欄位會沿用 `multi_factor_analysis`，`factors` 在皆未指定時會從 `etl.factors.factors_list` 指向的 `factors/factors_list.json` 載入 `fundamental_features`。
+- **報告輸出**：本地 `data/single_factor_analysis_reports/...`，所有因子分析完成後，會統一將本次產生的報告批次上傳至 GCS（前提是 `.env` 設有 `GCS_BUCKET` 且未加 `--skip-gcs`）。
+
 ### 多因子回測
 
+**統一因子設定**（所有季度使用相同因子與權重）：
 ```bash
 python -m scripts.run_multi_factor_backtest \
   --dataset tw_top_50_stock_data_s20170516_e20210515_mv20170516 \
   --factors "營運現金流,歸屬母公司淨利,稅後淨利成長率" \
   --start 2017-05-16 --end 2021-05-15
 ```
+
+**季度因子設定**（每季可指定不同因子組合與權重）：
+在 `config/settings.yaml` 的 `multi_factor_backtest.quarterly_factors` 設定：
+```yaml
+multi_factor_backtest:
+  quarterly_factors:
+    "2017-Q1":
+      - name: "營運現金流"
+        weight: 0.2
+      - name: "歸屬母公司淨利"
+        weight: 0.2
+      - name: "營業利益成長率"
+        weight: 0.2
+      - name: "稅前淨利成長率"
+        weight: 0.2
+      - name: "稅後淨利成長率"
+        weight: 0.2
+    "2017-Q2":
+      - name: "營運現金流"
+        weight: 0.3
+      - name: "ROE稅後"
+        weight: 0.7
+  # factors 與 weights 作為預設值（未在 quarterly_factors 中指定的季度會使用此設定）
+  factors: ["營運現金流", "歸屬母公司淨利", "稅後淨利成長率"]
+```
+
+執行時，系統會：
+1. 對每個季度，若 `quarterly_factors` 中有該季度設定，則使用該季度的因子與權重
+2. 若該季度未在 `quarterly_factors` 中，則使用 `factors` 與 `weights`（或等權）
+3. 計算每季的加權排名後合併，進行回測
 
 更多參數見 `config/settings.yaml` 註解；CLI 傳入會覆寫設定檔。
 
@@ -179,7 +223,7 @@ python -m scripts.run_multi_factor_backtest \
 | 回測策略   | `strategies/factor_rank_strategy.py`（依 rank 做多 buy_n / 做空 sell_n）      |
 
 ```
-scripts/    run_etl_pipeline.py, run_multi_factor_analysis.py, run_multi_factor_backtest.py
+scripts/    run_etl_pipeline.py, run_multi_factor_analysis.py, run_single_factor_analysis.py, run_multi_factor_backtest.py
 factors/    factor_ranking.py, finlab_factor_fetcher.py, factors_list.json
 strategies/ data_feed.py, factor_rank_strategy.py
 config/     settings.yaml
@@ -219,5 +263,5 @@ config/     settings.yaml
 
 ### 7.5 其他
 
--   **手續費／證交稅**：`config/settings.yaml` 的 `etl.backtest_config`（fee_bps、tax_bps）僅供參考，回測實際使用 `multi_factor_backtest.commission`；若需更細的買賣稅費，可於策略或 broker 中擴充。
+-   **手續費設定**：實際回測僅使用 `config/settings.yaml` 的 `multi_factor_backtest.commission`（如 0.001 表示 0.1% 手續費）。若需證交稅或更細的買賣稅費，可於策略或 broker 中自行擴充。
 -   **缺漏排名**：策略中 `rank == 999999` 視為缺漏，該標的不會被選入做多／做空，避免將無排名資料納入交易。

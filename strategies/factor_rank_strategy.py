@@ -53,7 +53,7 @@ class FactorRankStrategy(Strategy):
             name = data._name
             close_price = data.close[0]
             size = int(self.params.each_cash / close_price) if self.params.each_cash else 0
-
+            
             if self.params.sell_n:
                 if name in self.sell_positions and name not in sell_n_names:
                     self.close(data)

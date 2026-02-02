@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 from itertools import combinations
+from contextlib import redirect_stdout
 
 import pandas as pd
 import numpy as np
@@ -121,7 +122,7 @@ def _factor_series_for_alphalens(
     combined_or_pc: pd.DataFrame,
     index_names: tuple[str, str] = ("date", "stock_id"),
 ) -> pd.Series:
-    """將組合排名或主成分 DataFrame 轉成 Alphalens 所需的 MultiIndex Series。"""
+    """將組合排名或主成分 DataFrame 轉成 Alphalens 所需的 MultiIndex Series"""
     s = combined_or_pc.squeeze()
     if not isinstance(s, pd.Series):
         s = combined_or_pc.iloc[:, 0]
@@ -138,7 +139,7 @@ def run_weighted_rank(
     periods: list[int],
 ) -> list[Path]:
     """
-    多因子加權排名：對每個 N 因子組合計算加權排名，再跑 Alphalens，回傳報告路徑列表。
+    多因子加權排名：對每個 N 因子組合計算加權排名，再跑 Alphalens，回傳報告路徑列表
     """
     from itertools import combinations as comb
 
@@ -208,7 +209,7 @@ def run_pca(
     periods: list[int],
 ) -> list[Path]:
     """
-    多因子 PCA：合併因子 → 標準化 → PCA → 對指定主成分跑 Alphalens，回傳報告路徑列表。
+    多因子 PCA：合併因子 → 標準化 → PCA → 對指定主成分跑 Alphalens，回傳報告路徑列表
     """
     try:
         from sklearn.decomposition import PCA
@@ -287,19 +288,32 @@ def _save_tear_sheet(
     label: str,
     params: dict,
 ) -> Optional[Path]:
-    """產生 Alphalens tear sheet 並存到 data/multi_factor_analysis_reports/s{開始}_e{結束}_mv{市值日}/{multi_模式}_{因子名}_{時間戳}/。"""
-    now = datetime.now()
-    timestamp = now.strftime("%Y%m%d_%H%M%S")
+    """
+    產生 Alphalens tear sheet 並存到：
+        data/multi_factor_analysis_reports/
+          s{開始}_e{結束}_mv{市值日}/
+            multi_{mode}_{timestamp}/{label}/
+
+    並輸出 PDF、PNG 及文字 summary（stdout 內容）。
+    """
+    # 本次執行共用的時間戳（由 main 設定），若未提供則當場產生
+    run_ts = params.get("run_timestamp")
+    if not run_ts:
+        run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        params["run_timestamp"] = run_ts
+
     safe_label = label.replace("/", "_").replace("\\", "_").replace(",", "_")
     start_s = (params["start"] or "").replace("-", "")
     end_s = (params["end"] or "").replace("-", "")
     mv = params.get("market_value_date") or params.get("start") or ""
     mv_s = mv.replace("-", "") if isinstance(mv, str) else ""
     range_dir = f"s{start_s}_e{end_s}_mv{mv_s}"
-    folder_name = f"multi_{params['mode']}_{safe_label}_{timestamp}"
-    report_dir = ROOT_DIR / "data" / "multi_factor_analysis_reports" / range_dir / folder_name
+    # 外層依模式與執行時間戳建立資料夾，內層再依因子組合或主成分名稱區分
+    outer_folder = f"multi_{params['mode']}_{run_ts}"
+    outer_dir = ROOT_DIR / "data" / "multi_factor_analysis_reports" / range_dir / outer_folder
+    report_dir = outer_dir / safe_label
     report_dir.mkdir(parents=True, exist_ok=True)
-    report_base = f"multi_{params['mode']}_{timestamp}"
+    report_base = f"multi_{params['mode']}_{run_ts}"
     report_path = report_dir / report_base
 
     # 在 plt.show 被 Alphalens 呼叫時「當場」儲存 figure，避免 show/close 後變成空白
@@ -324,34 +338,24 @@ def _save_tear_sheet(
 
     _original_show = plt.show
     plt.show = _save_on_show
+
+    # 將 Alphalens 在終端機輸出的各項統計（Quantiles Statistics、Returns Analysis、IC 等）
+    # 一併寫入 summary 檔案
+    summary_path = report_dir / f"{report_base}_summary.txt"
     try:
-        create_full_tear_sheet(alphalens_data)
+        with open(summary_path, "w", encoding="utf-8") as summary_file, redirect_stdout(
+            summary_file
+        ):
+            create_full_tear_sheet(alphalens_data)
     finally:
         plt.show = _original_show
         pdf_file.close()
 
     if saved_count[0] > 0:
         logger.info(f"報表已保存: {report_dir}")
-        # 上傳報表至 GCS
-        if not params.get("skip_gcs"):
-            bucket_name = os.getenv("GCS_BUCKET")
-            if bucket_name:
-                gcs_prefix = f"data/multi_factor_analysis_reports/{range_dir}/{folder_name}"
-                for f in report_dir.iterdir():
-                    if f.is_file():
-                        try:
-                            upload_file(
-                                bucket_name,
-                                f,
-                                f"{gcs_prefix}/{f.name}",
-                            )
-                            logger.info(f"已上傳至 GCS: {gcs_prefix}/{f.name}")
-                        except Exception as e:
-                            logger.warning(f"上傳 {f.name} 至 GCS 失敗: {e}")
-            else:
-                logger.warning("GCS_BUCKET 未設定，略過上傳報表至 GCS")
     else:
         logger.warning("未偵測到 Alphalens 產生的圖表")
+        report_dir = None
     return report_dir
 
 
@@ -406,6 +410,10 @@ def main() -> int:
     logger.info(f"模式: {params['mode']}")
     logger.info(f"因子: {params['factors']}")
     logger.info(f"日期: {params['start']} ~ {params['end']}")
+
+    # 為本次執行產生統一的時間戳，供所有報表共用（資料夾與檔名一致）
+    if not params.get("run_timestamp"):
+        params["run_timestamp"] = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     try:
         local_price_path = params["local_price"]
@@ -486,6 +494,45 @@ def main() -> int:
             )
 
         logger.info(f"共產生 {len(report_paths)} 份報告")
+
+        # 所有組合／主成分分析完成後，一次性上傳所有報告至 GCS
+        if report_paths and not params.get("skip_gcs"):
+            bucket_name = os.getenv("GCS_BUCKET")
+            if bucket_name:
+                start_s = (params["start"] or "").replace("-", "")
+                end_s = (params["end"] or "").replace("-", "")
+                mv = params.get("market_value_date") or params.get("start") or ""
+                mv_s = mv.replace("-", "") if isinstance(mv, str) else ""
+                range_dir = f"s{start_s}_e{end_s}_mv{mv_s}"
+
+                logger.info("開始上傳 %d 個多因子報告至 GCS...", len(report_paths))
+                for report_dir in report_paths:
+                    if not report_dir or not report_dir.exists():
+                        continue
+                    outer_folder = report_dir.parent.name
+                    label_folder = report_dir.name
+                    gcs_prefix = (
+                        f"data/multi_factor_analysis_reports/{range_dir}/{outer_folder}/{label_folder}"
+                    )
+                    for f in report_dir.iterdir():
+                        if f.is_file():
+                            try:
+                                upload_file(
+                                    bucket_name,
+                                    f,
+                                    f"{gcs_prefix}/{f.name}",
+                                )
+                                logger.info(
+                                    "已上傳多因子報表至 GCS: %s/%s",
+                                    gcs_prefix,
+                                    f.name,
+                                )
+                            except Exception as e:
+                                logger.warning("上傳 %s 至 GCS 失敗: %s", f.name, e)
+                logger.info("所有多因子報告已上傳至 GCS 完成")
+            else:
+                logger.warning("GCS_BUCKET 未設定，略過上傳多因子報表至 GCS")
+
         logger.info("=== Alphalens 多因子分析完成 ===")
         return 0
 

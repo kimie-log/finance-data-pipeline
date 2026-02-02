@@ -58,20 +58,20 @@ def main() -> int:
     params = resolve_params(config, args, ROOT_DIR)
 
     bucket_name = os.getenv("GCS_BUCKET")
-    bq_dataset = params["dataset_id"]  # 例：tw_top_50_stock_data
+    bq_dataset = params["dataset_id"]  
 
     now = datetime.now()
-    date_folder = now.strftime("%Y-%m-%d")  # 本地輸出子資料夾，例：2026-02-02
-    timestamp = now.strftime("%Y%m%d_%H%M")  # 檔名時間戳，例：20260202_1215
+    date_folder = now.strftime("%Y-%m-%d")  
+    timestamp = now.strftime("%Y%m%d_%H%M")  
 
     # 必填參數檢查
     if not params.get("market_value_dates") or not params["start_date"] or not params["end_date"]:
         logger.error(
-            "請提供 market_value_date(s)、start、end（可從 CLI 或 config.etl / yfinance 設定）。"
+            "請提供 market_value_date(s)、start、end（可從 CLI 或 config.etl / yfinance 設定）"
         )
         return 1
 
-    # 本地輸出目錄：raw 存 yfinance 原始資料，processed 存清洗後價量與因子
+    # 本地輸出目錄：raw 存 yfinance 原始資料/ processed 存清洗後價量與因子
     raw_dir = ROOT_DIR / "data/raw" / date_folder
     processed_dir = ROOT_DIR / "data/processed" / date_folder
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -129,7 +129,7 @@ def main() -> int:
             raw_local_path = raw_dir / raw_filename
             df_ohlcv_raw.to_parquet(raw_local_path)
 
-            # 可選：上傳 raw parquet 至 GCS data/raw/{date_folder}/
+            # (預設會上傳) raw parquet 上傳至 GCS data/raw/{date_folder}/
             if not params["skip_gcs"]:
                 upload_file(
                     bucket_name,
@@ -146,6 +146,7 @@ def main() -> int:
         logger.info("=== STEP 2: Transformation Started (OHLCV) ===")
 
         try:
+            # 清洗 OHLCV 價量資料
             df_cleaned_price = Transformer.process_ohlcv_data(df_ohlcv_raw)
 
             if df_cleaned_price.empty:
@@ -169,7 +170,7 @@ def main() -> int:
 
             df_cleaned_price.to_parquet(processed_path, index=False, compression="snappy")
 
-            # 可選：上傳 processed 價量 parquet 至 GCS
+            # (預設會上傳) processed 價量 parquet 上傳至 GCS
             if not params["skip_gcs"]:
                 upload_file(
                     bucket_name,
@@ -238,19 +239,6 @@ def main() -> int:
                         table_id="fact_benchmark_daily",
                         if_exists="truncate",
                     )
-
-            # dim_backtest_config：回測預設參數（手續費 fee_bps、證交稅 tax_bps 等）
-            if params.get("backtest_config"):
-                cfg = params["backtest_config"]
-                backtest_df = pd.DataFrame(
-                    [{"config_key": k, "config_value": v} for k, v in cfg.items()]
-                )
-                load_to_bigquery(
-                    df=backtest_df,
-                    dataset_id=target_dataset,
-                    table_id="dim_backtest_config",
-                    if_exists="truncate",
-                )
 
             # fact_factor（可選）：財報因子日頻資料，需 --with-factors 且 factor_names 非空
             # factor_names 優先順序：--factor-names > config > factors/factors_list.json
