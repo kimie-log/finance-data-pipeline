@@ -159,7 +159,7 @@ def load_factor_data(
             stock_id,
             value as factor_value
         FROM `{project_id}.{dataset_id}.{factor_table}`
-        WHERE date >= @start_date AND date <= @end_date
+        WHERE DATE(date) >= @start_date AND DATE(date) <= @end_date
             AND factor_name = @factor_name
         ORDER BY date, stock_id
         """
@@ -180,7 +180,7 @@ def load_factor_data(
             stock_id,
             `{factor_name_escaped}` as factor_value
         FROM `{project_id}.{dataset_id}.{factor_table}`
-        WHERE date >= @start_date AND date <= @end_date
+        WHERE DATE(date) >= @start_date AND DATE(date) <= @end_date
         ORDER BY date, stock_id
         """
         job_config = bigquery.QueryJobConfig(

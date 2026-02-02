@@ -1,99 +1,165 @@
-# ETL Pipeline 設定
-etl:
-    # 市值基準日（單一，與 market_value_dates 二擇一）
-    market_value_date: null   # 例: '2024-01-15'
-    market_value_dates: []     # 例: ['2024-01-15', '2024-02-15']
+# =============================================================================
+# Finance Data Pipeline — 設定檔
+# =============================================================================
+# 本檔為 ETL、多因子分析、多因子回測的預設參數；CLI 傳入的參數會覆寫對應項目。
+# 路徑：config/settings.yaml
+# =============================================================================
 
-    # 略過上傳 GCS
+# -----------------------------------------------------------------------------
+# ETL Pipeline
+# -----------------------------------------------------------------------------
+# 價量與因子資料的擷取、轉換、載入；產出 BigQuery 資料集與本地 Parquet。
+# 執行：python -m scripts.run_etl_pipeline [--參數...]
+# -----------------------------------------------------------------------------
+etl:
+    # 市值基準日（二擇一）
+    #   market_value_date：單一日，用於選定該日市值前 N 大的股票作為 universe
+    #   market_value_dates：多日列表，用於滾動市值選股（例如每月重算）
+    market_value_date: null   # 例: "2024-01-15"
+    market_value_dates: []     # 例: ["2024-01-15", "2024-02-15"]
+
+    # 是否略過將 Parquet 上傳至 Google Cloud Storage
     skip_gcs: false
 
-    # 一併寫入財報因子
-    with_factors: true
+    # 是否一併從 FinLab 抓取財報因子並寫入 fact_factor（BigQuery + 本地 Parquet）
+    with_factors: false
 
-    # 略過基準指數
+    # 是否略過抓取基準指數（如 ^TWII）價量
     skip_benchmark: false
 
-    # 略過交易日曆
+    # 是否略過寫入交易日曆至 BigQuery
     skip_calendar: false
 
-    # BigQuery 設定
+    # BigQuery
     bigquery:
-        # BigQuery Dataset ID（用於識別資料集）
-        dataset: 'tw_top_{_top_n}_stock_data'
-        # BigQuery 位置
-        location: 'asia-east1'
+        # Dataset ID；可含模板 {top_n} 或 {_top_n}，執行時會代換為 etl.top_stocks.top_n
+        # 例：tw_top_50_stock_data、tw_top_{_top_n}_stock_data
+        dataset: "tw_top_{_top_n}_stock_data"
+        # BigQuery 區域（如 asia-east1）
+        location: "asia-east1"
 
-    # 股票列表設定
+    # 股票名單（universe）設定：依市值與產業篩選
     top_stocks:
+        # 取「市值基準日」當日市值前 N 大的股票
         top_n: 50
+        # 排除以下產業（FinLab 產業分類名稱）
         excluded_industry:
             - 建材營造
             - 金融業
             - 金融保險業
             - 存託憑證
-        pre_list_date: '2021-01-01'
+        # 僅納入「上市日早於此日」的股票，避免新股資料不完整
+        pre_list_date: "2017-01-03"
 
-    # yfinance 設定
+    # 價量資料來源（yfinance）
     yfinance:
-        # yfinance 起始日期
-        start: '2020-01-01'
-        # yfinance 結束日期
+        # 價量區間起始日 (YYYY-MM-DD)
+        start: "2020-01-01"
+        # 價量區間結束日；null 表示不設限或由 CLI 指定
         end: null
 
-    # finlab 設定
+    # FinLab 開關（universe、因子等是否使用 FinLab API）
     finlab:
         enabled: true
 
-    # 財報因子設定
+    # 財報因子設定（僅在 with_factors: true 時使用）
     factors:
+        # 要寫入的因子名稱列表；空列表時改從 factors_list 指向的 JSON 載入 fundamental_features
         factor_names: []
+        # factors_list.json 路徑；null 時預設為專案內 factors/factors_list.json
+        factors_list: null
+        # 因子表名後綴；null 表示不加後綴（表名如 fact_factor）
         factor_table_suffix: null
 
-    # 基準指數設定
+    # 基準指數（用於對照報酬，如大盤）
     benchmark:
+        # yfinance 指數代碼，可多個；^TWII 為加權指數
         index_ids: ["^TWII"]
 
-    # 回測設定
+    # 回測相關常數（供後續回測腳本參考，ETL 本身不寫入）
     backtest_config:
-        fee_bps: 30
-        tax_bps: 10
+        fee_bps: 30   # 手續費基點 (1 bps = 0.01%)
+        tax_bps: 10   # 證交稅基點
 
-# 單因子分析設定
-single_factor_analysis:
-    dataset: null
-    factor: null
-    start: null
-    end: null
-    local_price: null
-    local_factor: null
-    quantiles: 5
-    periods: "1,5,10"
-    factor_table: "fact_factor"
-    auto_find_local: false
-    from_finlab_api: false
 
-# 多因子分析設定（加權排名 或 PCA）
+# -----------------------------------------------------------------------------
+# 多因子分析（Alphalens）
+# -----------------------------------------------------------------------------
+# 多因子加權排名或 PCA 後，對組合／主成分做 Alphalens 分析，產出 IC、分位數、tear sheet。
+# 執行：python -m scripts.run_multi_factor_analysis [--參數...]
+# -----------------------------------------------------------------------------
 multi_factor_analysis:
+    # BigQuery dataset ID（與 ETL 產出的 dataset 一致）
     dataset: null
+    # 分析區間起始日 (YYYY-MM-DD)
     start: null
+    # 分析區間結束日 (YYYY-MM-DD)
     end: null
+    # 市值基準日 (YYYY-MM-DD)，用於報告路徑 s{開始}_e{結束}_mv{市值日}；null 時用 start
+    market_value_date: null
+    # 本地價量 Parquet 路徑；若設為路徑則優先使用本地檔，不讀 BigQuery 價量
     local_price: null
+    # Alphalens 分位數數量（如 5 表示分成五組）
     quantiles: 5
+    # 前瞻報酬期間（日），逗號分隔字串；用於計算不同持有期的因子效果
     periods: "1,5,10"
+    # BigQuery 因子表名稱（與 ETL 寫入的 fact_* 表名對應）
     factor_table: "fact_factor"
+    # 是否自動在 data/processed 下依日期與 dataset 尋找價量／因子 Parquet
     auto_find_local: false
+    # 是否從 FinLab API 即時抓取因子（不讀 BigQuery／本地因子表）
     from_finlab_api: false
-    # 分析模式：weighted_rank（多因子加權排名）或 pca（主成分分析）
+    # 是否略過將產出的報表上傳至 GCS
+    skip_gcs: false
+
+    # 分析模式：weighted_rank（加權排名）或 pca（主成分分析）
     mode: "weighted_rank"
-    # 因子名稱列表（可從 config 或 CLI --factors 指定）
+    # 參與分析的因子名稱列表；可於 CLI 以 --factors "A,B,C" 覆寫
     factors: []
-    # weighted_rank 專用：每個組合的因子數量（例如 5 表示五因子組合）
+    # 【weighted_rank】每個組合包含的因子數量（如 5 表示五因子加權排名）
     combo_size: 5
-    # weighted_rank 專用：等權重時使用；或傳入逗號分隔權重與 combo_size 一致
+    # 【weighted_rank】各因子權重；null 表示等權；可為逗號分隔字串或列表，長度需與 combo_size 一致
     weights: null
-    # weighted_rank：因子與收益正相關為 true
+    # 【weighted_rank】因子與收益是否為正相關（true：排名高者預期報酬高；false 則反之）
     positive_corr: true
-    # PCA 專用：要跑 Alphalens 的主成分編號（1-based），逗號分隔，例如 "2,4"
+    # 【pca】要跑 Alphalens 的主成分編號（1-based），逗號分隔，如 "2,4" 表示第 2、4 主成分
     pcs: "2,4"
-    # PCA 專用：主成分數量，null 表示 因子數-1
+    # 【pca】主成分數量；null 表示使用「因子數 - 1」
     n_components: null
+
+
+# -----------------------------------------------------------------------------
+# 多因子回測（Backtrader + PyFolio）
+# -----------------------------------------------------------------------------
+# 依多因子加權排名做多／做空，產出 PyFolio tear sheet。
+# 執行：python -m scripts.run_multi_factor_backtest [--參數...]
+# -----------------------------------------------------------------------------
+multi_factor_backtest:
+    # BigQuery dataset ID（與 ETL 產出一致）
+    dataset: null
+    # 參與排名的因子名稱列表；例：["營運現金流", "歸屬母公司淨利", "稅後淨利成長率"]
+    factors: []
+    # 回測區間起始日 (YYYY-MM-DD)
+    start: null
+    # 回測區間結束日 (YYYY-MM-DD)
+    end: null
+    # 各因子權重；null 表示等權；可為列表或逗號分隔字串
+    weights: null
+    # 本地價量 Parquet 路徑；有值則優先使用，不從 BigQuery 讀價量
+    local_price: null
+    # 本地因子 Parquet 路徑；有值則優先使用，不從 BigQuery 讀因子
+    local_factor: null
+    # 是否自動在 data/processed 下尋找價量與因子 Parquet（與多因子分析一致）
+    auto_find_local: false
+    # 因子表名稱（與 ETL／分析設定一致）
+    factor_table: "fact_factor"
+    # 因子與收益是否正相關（true：排名高做多、低做空；false 則相反）
+    positive_corr: true
+    # 每期做多檔數（排名前 buy_n 名）
+    buy_n: 20
+    # 每期做空檔數（排名後 sell_n 名）
+    sell_n: 20
+    # 初始資金（元）
+    initial_cash: 20000000
+    # 手續費率（如 0.001 表示 0.1%）
+    commission: 0.001

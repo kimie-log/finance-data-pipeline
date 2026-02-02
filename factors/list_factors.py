@@ -228,10 +228,10 @@ def main() -> int:
     # 顯示使用建議
     print("\n💡 使用建議：")
     print("  1. 因子列表已自動更新到 factors/factors_list.json")
-    print("  2. 在單因子分析時使用：")
-    print("     python -m scripts.run_single_factor_analysis \\")
+    print("  2. 在多因子分析時使用：")
+    print("     python -m scripts.run_multi_factor_analysis \\")
     print("         --dataset <dataset_id> \\")
-    print("         --factor <因子名稱> \\")
+    print("         --factors <因子名稱逗號分隔> \\")
     print("         --start <start_date> \\")
     print("         --end <end_date>")
 

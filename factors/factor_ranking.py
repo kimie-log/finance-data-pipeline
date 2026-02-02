@@ -16,7 +16,7 @@ class FactorRanking:
     因子排名與加權排名工具  
 
     所有方法為 staticmethod。產出欄位對齊回測與選股需求，
-    支援單因子排名與多因子加權排名
+    支援多因子加權排名
     """
 
     @staticmethod
@@ -30,7 +30,8 @@ class FactorRanking:
         rank_result_column: Annotated[str, "排名結果欄位名"] = "rank",
     ) -> pd.DataFrame:
         """
-        依因子值對股票做每日排名。正相關時小值排前；負相關時大值排前
+        依因子值對股票做每日排名。
+        正相關時：大值排名高（rank 數字大）、小值排名低；負相關時反之。
         對齊 utils_for_referance.rank_stocks_by_factor
         """
         ranked = factor_df.copy()

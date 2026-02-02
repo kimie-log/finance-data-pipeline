@@ -59,6 +59,7 @@ except ImportError:
     sys.exit(1)
 
 from utils.data_loader import load_price_data, load_factor_data
+from utils.google_cloud_storage import upload_file
 from utils.logger import logger
 from utils.cli import load_config, resolve_multi_factor_params
 from factors.factor_ranking import FactorRanking
@@ -258,6 +259,8 @@ def run_pca(
     )
     principal_df.index = principal_df.index.rename(["date", "stock_id"])
 
+    # 與 weighted_rank 相同：路徑含因子名稱，label 為 {因子1}_{因子2}_..._{PCn}
+    factor_names_joined = "_".join(factors_data_dict.keys())
     pcs_to_run = params.get("pcs") or [2, 4]
     report_paths = []
     for pc_num in pcs_to_run:
@@ -272,7 +275,8 @@ def run_pca(
             quantiles=params["quantiles"],
             periods=periods,
         )
-        report_dir = _save_tear_sheet(alphalens_data, label=col, params=params)
+        label = f"{factor_names_joined}_{col}"
+        report_dir = _save_tear_sheet(alphalens_data, label=label, params=params)
         if report_dir:
             report_paths.append(report_dir)
     return report_paths
@@ -283,44 +287,72 @@ def _save_tear_sheet(
     label: str,
     params: dict,
 ) -> Optional[Path]:
-    """產生 Alphalens tear sheet 並將圖表存到 data/multi_factor_analysis_reports/。"""
+    """產生 Alphalens tear sheet 並存到 data/multi_factor_analysis_reports/s{開始}_e{結束}_mv{市值日}/{multi_模式}_{因子名}_{時間戳}/。"""
     now = datetime.now()
     timestamp = now.strftime("%Y%m%d_%H%M%S")
     safe_label = label.replace("/", "_").replace("\\", "_").replace(",", "_")
-    folder_name = f"multi_{params['mode']}_{safe_label}_s{params['start']}_e{params['end']}_{timestamp}"
-    report_dir = ROOT_DIR / "data" / "multi_factor_analysis_reports" / folder_name
+    start_s = (params["start"] or "").replace("-", "")
+    end_s = (params["end"] or "").replace("-", "")
+    mv = params.get("market_value_date") or params.get("start") or ""
+    mv_s = mv.replace("-", "") if isinstance(mv, str) else ""
+    range_dir = f"s{start_s}_e{end_s}_mv{mv_s}"
+    folder_name = f"multi_{params['mode']}_{safe_label}_{timestamp}"
+    report_dir = ROOT_DIR / "data" / "multi_factor_analysis_reports" / range_dir / folder_name
     report_dir.mkdir(parents=True, exist_ok=True)
-    report_filename = f"alphalens_{safe_label}_{timestamp}"
-    report_path = report_dir / report_filename
+    report_base = f"multi_{params['mode']}_{timestamp}"
+    report_path = report_dir / report_base
 
-    figures_before = set(plt.get_fignums())
-    create_full_tear_sheet(alphalens_data)
-    new_fignums = sorted(set(plt.get_fignums()) - figures_before)
+    # 在 plt.show 被 Alphalens 呼叫時「當場」儲存 figure，避免 show/close 後變成空白
+    from matplotlib.backends.backend_pdf import PdfPages
 
-    try:
-        from matplotlib.backends.backend_pdf import PdfPages
-        pdf_path = report_path.with_suffix(".pdf")
-        if new_fignums:
-            with PdfPages(pdf_path) as pdf:
-                for i, fig_num in enumerate(new_fignums):
-                    fig = plt.figure(fig_num)
-                    fig.canvas.draw()
-                    pdf.savefig(fig, bbox_inches="tight", facecolor="white")
-                    png_path = report_dir / f"{report_filename}_page_{i + 1:02d}.png"
-                    fig.savefig(png_path, dpi=150, bbox_inches="tight", facecolor="white")
-                    plt.close(fig)
-        else:
-            fig = plt.gcf()
-            if fig.axes:
+    pdf_path = report_path.with_suffix(".pdf")
+    pdf_file = PdfPages(pdf_path)
+    saved_count = [0]
+
+    def _save_on_show(*args, **kwargs):
+        fig = plt.gcf()
+        if fig.axes:
+            try:
                 fig.canvas.draw()
-                fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")
-                fig.savefig(report_dir / f"{report_filename}_page_01.png", dpi=150, bbox_inches="tight", facecolor="white")
-            plt.close(fig)
+                pdf_file.savefig(fig, bbox_inches="tight", facecolor="white")
+                saved_count[0] += 1
+                png_path = report_path.parent / f"{report_base}_page_{saved_count[0]:02d}.png"
+                fig.savefig(png_path, dpi=150, bbox_inches="tight", facecolor="white")
+                logger.info(f"  已保存圖表 {saved_count[0]}: {png_path.name}")
+            except Exception as e:
+                logger.warning(f"保存圖表時失敗: {e}")
+
+    _original_show = plt.show
+    plt.show = _save_on_show
+    try:
+        create_full_tear_sheet(alphalens_data)
+    finally:
+        plt.show = _original_show
+        pdf_file.close()
+
+    if saved_count[0] > 0:
         logger.info(f"報表已保存: {report_dir}")
-        return report_dir
-    except Exception as e:
-        logger.warning(f"保存報表失敗: {e}")
-        return None
+        # 上傳報表至 GCS
+        if not params.get("skip_gcs"):
+            bucket_name = os.getenv("GCS_BUCKET")
+            if bucket_name:
+                gcs_prefix = f"data/multi_factor_analysis_reports/{range_dir}/{folder_name}"
+                for f in report_dir.iterdir():
+                    if f.is_file():
+                        try:
+                            upload_file(
+                                bucket_name,
+                                f,
+                                f"{gcs_prefix}/{f.name}",
+                            )
+                            logger.info(f"已上傳至 GCS: {gcs_prefix}/{f.name}")
+                        except Exception as e:
+                            logger.warning(f"上傳 {f.name} 至 GCS 失敗: {e}")
+            else:
+                logger.warning("GCS_BUCKET 未設定，略過上傳報表至 GCS")
+    else:
+        logger.warning("未偵測到 Alphalens 產生的圖表")
+    return report_dir
 
 
 def main() -> int:
@@ -333,6 +365,7 @@ def main() -> int:
     parser.add_argument("--dataset", default=cfg.get("dataset"), help="BigQuery Dataset ID")
     parser.add_argument("--start", default=cfg.get("start"), help="分析區間起始 (YYYY-MM-DD)")
     parser.add_argument("--end", default=cfg.get("end"), help="分析區間結束 (YYYY-MM-DD)")
+    parser.add_argument("--market-value-date", default=cfg.get("market_value_date"), help="市值基準日 (YYYY-MM-DD)，用於報告路徑 mv 資料夾名")
     parser.add_argument("--local-price", default=cfg.get("local_price"), help="本地價量 parquet 路徑")
     parser.add_argument("--quantiles", type=int, default=cfg.get("quantiles", 5), help="分位數數量")
     parser.add_argument("--periods", type=str, default=cfg.get("periods", "1,5,10"), help="前瞻期間，逗號分隔")
@@ -353,12 +386,14 @@ def main() -> int:
     parser.set_defaults(positive_corr=cfg.get("positive_corr", True))
     parser.add_argument("--pcs", type=str, default=cfg.get("pcs", "2,4"), help="pca：要分析的主成分編號，逗號分隔")
     parser.add_argument("--n-components", type=int, default=None, help="pca：主成分數量，預設為因子數-1")
+    parser.add_argument("--skip-gcs", action="store_true", help="略過上傳報表至 GCS；未加則上傳")
 
     args = parser.parse_args()
     params = resolve_multi_factor_params(config, args)
 
-    if not params["dataset"] or not params["start"] or not params["end"]:
-        logger.error("請提供 dataset、start、end（可從 config 或 CLI 指定）")
+    missing = [k for k in ("dataset", "start", "end") if not params.get(k)]
+    if missing:
+        logger.error("請提供以下參數（可從 config 或 CLI 指定）：%s。例：--dataset <dataset_id> --start 2017-05-16 --end 2021-05-15", ", ".join(missing))
         return 1
     if not params["factors"]:
         logger.error("請提供至少一個因子（config.multi_factor_analysis.factors 或 --factors）")
@@ -374,10 +409,15 @@ def main() -> int:
 
     try:
         local_price_path = params["local_price"]
-        if params["auto_find_local"] and not local_price_path:
-            found = find_local_parquet_files(params["dataset"], params["start"], params["end"], "price")
-            if found:
-                local_price_path = str(found)
+        local_factor_path = None
+        if params["auto_find_local"]:
+            if not local_price_path:
+                found = find_local_parquet_files(params["dataset"], params["start"], params["end"], "price")
+                if found:
+                    local_price_path = str(found)
+            found_factor = find_local_parquet_files(params["dataset"], params["start"], params["end"], "factor")
+            if found_factor:
+                local_factor_path = str(found_factor)
 
         df_price = load_price_data(
             dataset_id=params["dataset"],
@@ -403,7 +443,7 @@ def main() -> int:
                     factor_name=factor_name,
                     start_date=params["start"],
                     end_date=params["end"],
-                    local_parquet_path=None,
+                    local_parquet_path=local_factor_path if params["auto_find_local"] else None,
                     use_local_first=True,
                     factor_table=params["factor_table"],
                 )

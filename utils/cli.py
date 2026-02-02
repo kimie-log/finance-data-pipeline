@@ -6,6 +6,7 @@ CLI 參數解析與設定檔合併工具。
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -101,6 +102,16 @@ def parse_args(config: Optional[dict] = None) -> argparse.Namespace:
         default=fac.get("factor_table_suffix") if config else None,
         help="因子表名後綴；未指定時用 config.etl.factors.factor_table_suffix",
     )
+    parser.add_argument(
+        "--factor-names",
+        default=None,
+        help="因子名稱，逗號分隔；未指定時用 config.etl.factors.factor_names 或 factors_list.json",
+    )
+    parser.add_argument(
+        "--factors-list",
+        default=None,
+        help="factors_list.json 路徑；給定則載入 fundamental_features 作為 factor_names",
+    )
     return parser.parse_args()
 
 
@@ -121,7 +132,19 @@ def load_config(root_dir: Path) -> dict:
     return yaml.safe_load(open(config_path))
 
 
-def resolve_params(config: dict, args: argparse.Namespace) -> dict:
+def _load_factor_names_from_json(path: Path) -> list:
+    """從 factors_list.json 載入 fundamental_features，失敗則回傳空列表。"""
+    if not path or not Path(path).exists():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("fundamental_features", []) or []
+    except Exception:
+        return []
+
+
+def resolve_params(config: dict, args: argparse.Namespace, root_dir: Optional[Path] = None) -> dict:
     """
     合併設定檔與 CLI 參數：預設使用 config，僅在 CLI 有傳入該項時覆寫；處理 dataset 模板與市值日。
 
@@ -189,6 +212,20 @@ def resolve_params(config: dict, args: argparse.Namespace) -> dict:
         getattr(args, "factor_table_suffix", None) or factors_cfg.get("factor_table_suffix")
     )
 
+    # factor_names: CLI --factor-names > config > factors_list.json（--factors-list 或預設 factors/factors_list.json）
+    factor_names_raw = getattr(args, "factor_names", None)
+    if factor_names_raw and isinstance(factor_names_raw, str) and factor_names_raw.strip():
+        factor_names = [f.strip() for f in factor_names_raw.split(",") if f.strip()]
+    elif factors_cfg.get("factor_names"):
+        factor_names = factors_cfg["factor_names"] if isinstance(factors_cfg["factor_names"], list) else [factors_cfg["factor_names"]]
+    else:
+        factors_list_path = getattr(args, "factors_list", None) or factors_cfg.get("factors_list")
+        if not factors_list_path and root_dir:
+            default_path = root_dir / "factors" / "factors_list.json"
+            if default_path.exists():
+                factors_list_path = str(default_path)
+        factor_names = _load_factor_names_from_json(Path(factors_list_path) if factors_list_path else None)
+
     return {
         "market_value_dates": market_value_dates,
         "market_value_date": market_value_dates[0] if market_value_dates else None,
@@ -200,40 +237,12 @@ def resolve_params(config: dict, args: argparse.Namespace) -> dict:
         "dataset_id": dataset_id,
         "skip_gcs": skip_gcs,
         "with_factors": with_factors,
-        "factor_names": factors_cfg.get("factor_names", []),
+        "factor_names": factor_names,
         "benchmark_index_ids": benchmark_cfg.get("index_ids", ["^TWII"]),
         "backtest_config": backtest_cfg,
         "skip_benchmark": skip_benchmark,
         "skip_calendar": skip_calendar,
         "factor_table_suffix": factor_table_suffix,
-    }
-
-
-def resolve_single_factor_params(config: dict, args: argparse.Namespace) -> dict:
-    """
-    合併設定檔與 CLI 參數（單因子分析）：預設使用 config，僅在 CLI 有傳入該項時覆寫。
-
-    Args:
-        config: 設定檔 dict（來自 load_config）。
-        args: CLI 參數（來自 run_single_factor_analysis 的 parser）。
-
-    Returns:
-        合併後的參數 dict，鍵為 snake_case（dataset, factor, start, end, local_price,
-        local_factor, quantiles, periods, factor_table, auto_find_local, from_finlab_api）。
-    """
-    cfg = config.get("single_factor_analysis", {})
-    return {
-        "dataset": args.dataset if args.dataset is not None else cfg.get("dataset"),
-        "factor": args.factor if args.factor is not None else cfg.get("factor"),
-        "start": args.start if args.start is not None else cfg.get("start"),
-        "end": args.end if args.end is not None else cfg.get("end"),
-        "local_price": args.local_price or cfg.get("local_price"),
-        "local_factor": args.local_factor or cfg.get("local_factor"),
-        "quantiles": args.quantiles if args.quantiles is not None else (cfg.get("quantiles") if cfg.get("quantiles") is not None else 5),
-        "periods": args.periods if args.periods is not None else (cfg.get("periods") or "1,5,10"),
-        "factor_table": args.factor_table if args.factor_table is not None else (cfg.get("factor_table") or "fact_factor"),
-        "auto_find_local": args.auto_find_local if args.auto_find_local else cfg.get("auto_find_local", False),
-        "from_finlab_api": args.from_finlab_api if args.from_finlab_api else cfg.get("from_finlab_api", False),
     }
 
 
@@ -270,10 +279,15 @@ def resolve_multi_factor_params(config: dict, args: argparse.Namespace) -> dict:
         pcs_str = cfg.get("pcs") or "2,4"
         pcs = [int(x.strip()) for x in pcs_str.split(",") if x.strip()]
 
+    market_value_date = getattr(args, "market_value_date", None) or cfg.get("market_value_date")
+    if not market_value_date and getattr(args, "start", None):
+        market_value_date = getattr(args, "start")
+
     return {
         "dataset": getattr(args, "dataset", None) or cfg.get("dataset"),
         "start": getattr(args, "start", None) or cfg.get("start"),
         "end": getattr(args, "end", None) or cfg.get("end"),
+        "market_value_date": market_value_date,
         "local_price": getattr(args, "local_price", None) or cfg.get("local_price"),
         "quantiles": getattr(args, "quantiles", None) if getattr(args, "quantiles", None) is not None else (cfg.get("quantiles") or 5),
         "periods": getattr(args, "periods", None) or cfg.get("periods") or "1,5,10",
@@ -287,4 +301,49 @@ def resolve_multi_factor_params(config: dict, args: argparse.Namespace) -> dict:
         "positive_corr": getattr(args, "positive_corr", None) if getattr(args, "positive_corr", None) is not None else cfg.get("positive_corr", True),
         "pcs": pcs,
         "n_components": getattr(args, "n_components", None) or cfg.get("n_components"),
+        "skip_gcs": getattr(args, "skip_gcs", False) or cfg.get("skip_gcs", False),
+    }
+
+
+def resolve_multi_factor_backtest_params(config: dict, args: argparse.Namespace) -> dict:
+    """
+    合併設定檔與 CLI 參數（多因子回測）：預設使用 config.multi_factor_backtest，CLI 有傳則覆寫。
+
+    Returns:
+        合併後的參數 dict：dataset, factors, start, end, weights, local_price, local_factor,
+        factor_table, positive_corr, buy_n, sell_n, initial_cash, commission。
+    """
+    cfg = config.get("multi_factor_backtest", {})
+
+    factors_raw = getattr(args, "factors", None)
+    if factors_raw is not None and isinstance(factors_raw, str) and factors_raw.strip():
+        factors = [f.strip() for f in factors_raw.split(",") if f.strip()]
+    else:
+        factors = cfg.get("factors") or []
+    if isinstance(factors, str):
+        factors = [f.strip() for f in factors.split(",") if f.strip()]
+
+    weights_raw = getattr(args, "weights", None)
+    if weights_raw is not None and isinstance(weights_raw, str) and weights_raw.strip():
+        weights = [float(w.strip()) for w in weights_raw.split(",") if w.strip()]
+    else:
+        weights = cfg.get("weights")
+    if isinstance(weights, list) and not weights:
+        weights = None
+
+    return {
+        "dataset": getattr(args, "dataset", None) or cfg.get("dataset"),
+        "factors": factors,
+        "start": getattr(args, "start", None) or cfg.get("start"),
+        "end": getattr(args, "end", None) or cfg.get("end"),
+        "weights": weights,
+        "local_price": getattr(args, "local_price", None) or cfg.get("local_price"),
+        "local_factor": getattr(args, "local_factor", None) or cfg.get("local_factor"),
+        "auto_find_local": getattr(args, "auto_find_local", False) or cfg.get("auto_find_local", False),
+        "factor_table": getattr(args, "factor_table", None) or cfg.get("factor_table") or "fact_factor",
+        "positive_corr": False if getattr(args, "negative_corr", False) else cfg.get("positive_corr", True),
+        "buy_n": getattr(args, "buy_n", None) if getattr(args, "buy_n", None) is not None else (cfg.get("buy_n") if cfg.get("buy_n") is not None else 20),
+        "sell_n": getattr(args, "sell_n", None) if getattr(args, "sell_n", None) is not None else (cfg.get("sell_n") if cfg.get("sell_n") is not None else 20),
+        "initial_cash": getattr(args, "initial_cash", None) if getattr(args, "initial_cash", None) is not None else (cfg.get("initial_cash") if cfg.get("initial_cash") is not None else 20_000_000),
+        "commission": getattr(args, "commission", None) or cfg.get("commission") or 0.001,
     }

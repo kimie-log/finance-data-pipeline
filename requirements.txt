@@ -2,7 +2,7 @@
 
 # 核心資料處理與金融資料
 yfinance
-finlab
+finlab==1.5.7
 pandas
 numpy
 
@@ -23,6 +23,10 @@ pyarrow
 # 因子分析
 alphalens-reloaded
 matplotlib
+
+# 回測
+backtrader
+pyfolio-reloaded
 
 # 機器學習
 scikit-learn
