@@ -54,22 +54,29 @@ class Transformer:
 
         df = df_raw.copy()
 
+        # 欄位命名標準化：datetime → date，asset → stock_id
         df.rename(columns={"datetime": "date", "asset": "stock_id"}, inplace=True)
 
+        # 型別轉換：date 轉成 datetime，stock_id 轉成字串
         df["date"] = pd.to_datetime(df["date"])
         df["stock_id"] = df["stock_id"].astype(str)
 
+        # 量欄位強制轉為數字，無法轉換的則轉換為 NaN
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+        # 排序：依 stock_id, date 排序
         df.sort_values(by=["stock_id", "date"], inplace=True, ignore_index=True)
 
+        # 價格欄位向前填補：以同一檔股票的時間序列為單位，用 `ffill()` 向前填補
         price_cols = ["open", "high", "low", "close"]
         df[price_cols] = df.groupby("stock_id", sort=False)[price_cols].ffill()
         df["volume"] = df["volume"].fillna(0)
 
+        # 移除無效列：刪掉 close 為 NaN 的列：確保每列至少有收盤價，才能算日報酬
         df.dropna(subset=["close"], inplace=True)
 
+        # 計算日報酬：對每檔股票的 close 做 `pct_change()` 得到每日相對前一日的百分比變化
         df["daily_return"] = (
             df.groupby("stock_id", sort=False)["close"]
             .pct_change()

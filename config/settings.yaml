@@ -46,6 +46,7 @@ single_factor_analysis:
     local_factor: null
     quantiles: 5
     periods: "1,5,10"
+    max_loss: 0.35
     factor_table: "fact_factor"
     auto_find_local: false
     skip_gcs: false

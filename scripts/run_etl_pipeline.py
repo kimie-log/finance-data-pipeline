@@ -194,7 +194,7 @@ def main() -> int:
             start_tag = params["start_date"].replace("-", "")
             end_tag = params["end_date"].replace("-", "")
             
-            # Dataset 命名：{base}_s{YYYYMMDD}_e{YYYYMMDD}_mv{YYYYMMDD}，例：tw_top_50_stock_data_s20170516_e20210515_mv20170516
+            # Dataset 命名：{base}_s{YYYYMMDD}_e{YYYYMMDD}_mv{YYYYMMDD}
             target_dataset = f"{bq_dataset}_s{start_tag}_e{end_tag}_mv{mv_date_bq}"
 
             # fact_price：價量事實表，upsert 避免重複列

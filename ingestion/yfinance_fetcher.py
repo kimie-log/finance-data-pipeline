@@ -50,6 +50,7 @@ class YFinanceFetcher:
                 for symbol in stock_symbols
             ]
 
+        # 抓取價量資料
         all_stock_data = pd.concat(
             [
                 pd.DataFrame(
@@ -65,9 +66,12 @@ class YFinanceFetcher:
             ignore_index=True,
         )
 
+        # 選取需要的欄位
         all_stock_data = all_stock_data[
             ["Open", "High", "Low", "Close", "Volume", "datetime", "asset"]
         ]
+
+        # 重命名欄位(統一為小寫英文)
         all_stock_data.columns = [
             "open",
             "high",

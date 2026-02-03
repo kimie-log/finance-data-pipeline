@@ -1,5 +1,5 @@
 """
-多因子回測腳本（Backtrader + PyFolio）
+多因子回測腳本（Backtrader + PyFolio）。
 
 參考 references/回測/main_for_multiple_factors_backtrader_2.py，
 從 BigQuery 或本地 Parquet 讀取價量與多個因子，依季度做加權排名後做多／做空回測。
@@ -62,6 +62,10 @@ from utils.cli import load_config, resolve_multi_factor_backtest_params
 from utils.data_loader import load_factor_data, load_price_data
 from utils.google_cloud_storage import upload_file
 from utils.logger import logger
+from utils.alphalens_utils import (
+    ensure_factor_datetime_asset_value,
+    find_local_parquet_files,
+)
 
 
 def _quarters_in_range(start_date: str, end_date: str):
@@ -83,35 +87,6 @@ def _quarters_in_range(start_date: str, end_date: str):
             except ValueError:
                 pass
     return quarters
-
-
-def _factor_df_to_datetime_asset_value(df_factor: pd.DataFrame, factor_name: str) -> pd.DataFrame:
-    """將 load_factor_data 回傳的 MultiIndex/欄位轉成 datetime, asset, value。"""
-    out = df_factor.reset_index()
-    out = out.rename(columns={"date": "datetime", "stock_id": "asset"})
-    if factor_name in out.columns:
-        out["value"] = out[factor_name]
-    else:
-        val_col = [c for c in out.columns if c not in ("datetime", "asset")][0]
-        out["value"] = out[val_col]
-    return out[["datetime", "asset", "value"]]
-
-
-def find_local_parquet_files(
-    dataset_id: str,
-    start_date: str,
-    end_date: str,
-    data_type: str = "price",
-):
-    """在 data/processed 下尋找符合條件的 parquet 檔案。"""
-    processed_dir = ROOT_DIR / "data" / "processed"
-    if not processed_dir.exists():
-        return None
-    pattern = "fact_price*.parquet" if data_type == "price" else "fact_factor*.parquet"
-    parquet_files = list(processed_dir.rglob(pattern))
-    if not parquet_files:
-        return None
-    return max(parquet_files, key=lambda p: p.stat().st_mtime)
 
 
 def run_multi_factor_backtest(
@@ -160,11 +135,15 @@ def run_multi_factor_backtest(
 
     if auto_find_local:
         if not local_price_path:
-            found = find_local_parquet_files(dataset_id, start_date, end_date, "price")
+            found = find_local_parquet_files(
+                ROOT_DIR, dataset_id, start_date, end_date, "price"
+            )
             if found:
                 local_price_path = str(found)
         if not local_factor_path:
-            found = find_local_parquet_files(dataset_id, start_date, end_date, "factor")
+            found = find_local_parquet_files(
+                ROOT_DIR, dataset_id, start_date, end_date, "factor"
+            )
             if found:
                 local_factor_path = str(found)
 
@@ -201,7 +180,7 @@ def run_multi_factor_backtest(
             use_local_first=bool(local_factor_path),
             factor_table=factor_table,
         )
-        df_f = _factor_df_to_datetime_asset_value(df_f, factor_name)
+        df_f = ensure_factor_datetime_asset_value(df_f, factor_name)
         df_f["datetime"] = pd.to_datetime(df_f["datetime"])
         df_f = (
             df_f.sort_values(["asset", "datetime"])

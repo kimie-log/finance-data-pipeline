@@ -1,5 +1,5 @@
 """
-Alphalens 單因子分析腳本
+Alphalens 單因子分析腳本。
 
 用途：
     - 對「一個或多個單因子」逐一跑 Alphalens，檢視分位數報酬、IC、tear sheet。
@@ -60,82 +60,13 @@ from utils.data_loader import load_price_data, load_factor_data  # noqa: E402
 from utils.google_cloud_storage import upload_file  # noqa: E402
 from utils.logger import logger  # noqa: E402
 from utils.cli import load_config  # noqa: E402
-
-
-def prepare_prices_for_alphalens(df_price: pd.DataFrame) -> pd.DataFrame:
-    """將價量資料轉為 Alphalens 所需格式：index=date, columns=stock_id, values=close。"""
-    prices = df_price.pivot(index="date", columns="stock_id", values="close")
-    prices.index = pd.to_datetime(prices.index)
-    prices = prices.sort_index()
-    logger.info(
-        "價格資料準備完成: %d 個交易日，%d 檔股票", prices.shape[0], prices.shape[1]
-    )
-    return prices
-
-
-def find_local_parquet_files(
-    dataset_id: str,
-    start_date: str,
-    end_date: str,
-    data_type: str = "price",
-) -> Optional[Path]:
-    """在 data/processed 下尋找符合條件的 parquet 檔案。"""
-    processed_dir = ROOT_DIR / "data" / "processed"
-    if not processed_dir.exists():
-        return None
-    pattern = "fact_price*.parquet" if data_type == "price" else "fact_factor*.parquet"
-    parquet_files = list(processed_dir.rglob(pattern))
-    if not parquet_files:
-        return None
-    latest = max(parquet_files, key=lambda p: p.stat().st_mtime)
-    logger.info("找到本地 %s 檔案: %s", data_type, latest)
-    return latest
-
-
-def _ensure_factor_datetime_asset_value(
-    df: pd.DataFrame, factor_name: str
-) -> pd.DataFrame:
-    """
-    將因子 DataFrame 統一為 datetime, asset, value 欄位，供後續處理。
-
-    支援：
-        - 已含 datetime, asset, value
-        - datetime, asset + 單一數值欄位（例如因子名）
-        - date, stock_id + 單一數值欄位
-    """
-    if "datetime" in df.columns and "asset" in df.columns:
-        if "value" not in df.columns and factor_name in df.columns:
-            out = df[["datetime", "asset"]].copy()
-            out["value"] = df[factor_name].values
-            return out
-        return df[["datetime", "asset", "value"]].copy()
-
-    # date, stock_id 格式
-    out = df.reset_index() if isinstance(df.index, pd.MultiIndex) else df.copy()
-    out = out.rename(columns={"date": "datetime", "stock_id": "asset"})
-    value_col = [c for c in out.columns if c not in ("datetime", "asset")]
-    if value_col:
-        out["value"] = out[value_col[0]]
-    else:
-        raise ValueError("因子資料缺少數值欄位")
-    return out[["datetime", "asset", "value"]]
-
-
-def _factor_series_for_alphalens(
-    df_factor: pd.DataFrame,
-) -> pd.Series:
-    """
-    將 datetime, asset, value 因子資料轉成 Alphalens 所需 MultiIndex Series。
-
-    Index: (date, stock_id)
-    """
-    df = df_factor.copy()
-    df["date"] = pd.to_datetime(df["datetime"]).dt.normalize()
-    df["stock_id"] = df["asset"].astype(str)
-    df = df[["date", "stock_id", "value"]].dropna()
-    s = df.set_index(["date", "stock_id"])["value"]
-    s.index = s.index.rename(["date", "asset"])
-    return s
+from utils.alphalens_utils import (  # noqa: E402
+    prepare_prices_for_alphalens,
+    find_local_parquet_files,
+    ensure_factor_datetime_asset_value,
+    factor_series_for_alphalens,
+    save_single_factor_tear_sheet,
+)
 
 
 def _save_tear_sheet(
@@ -144,79 +75,15 @@ def _save_tear_sheet(
     params: dict,
 ) -> Optional[Path]:
     """
-    產生 Alphalens tear sheet 並存到
-    data/single_factor_analysis_reports/s{開始}_e{結束}_mv{市值日}/single_{因子名}_{時間戳}/。
+    向後相容的 wrapper，實作已抽到 utils.alphalens_utils.save_single_factor_tear_sheet。
     """
-    # 統一使用本次執行的時間戳，若未提供則當場產生
-    run_ts = params.get("run_timestamp")
-    if not run_ts:
-        run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        params["run_timestamp"] = run_ts
-
-    safe_label = label.replace("/", "_").replace("\\", "_").replace(",", "_")
-    start_s = (params["start"] or "").replace("-", "")
-    end_s = (params["end"] or "").replace("-", "")
-    mv = params.get("market_value_date") or params.get("start") or ""
-    mv_s = mv.replace("-", "") if isinstance(mv, str) else ""
-    range_dir = f"s{start_s}_e{end_s}_mv{mv_s}"
-    folder_name = f"single_{safe_label}_{run_ts}"
-    report_dir = (
-        ROOT_DIR
-        / "data"
-        / "single_factor_analysis_reports"
-        / range_dir
-        / folder_name
+    return save_single_factor_tear_sheet(
+        alphalens_data=alphalens_data,
+        label=label,
+        params=params,
+        root_dir=ROOT_DIR,
+        create_full_tear_sheet_func=create_full_tear_sheet,
     )
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_base = f"single_{run_ts}"
-    report_path = report_dir / report_base
-
-    from matplotlib.backends.backend_pdf import PdfPages
-
-    pdf_path = report_path.with_suffix(".pdf")
-    pdf_file = PdfPages(pdf_path)
-    saved_count = [0]
-
-    def _save_on_show(*args, **kwargs):
-        fig = plt.gcf()
-        if fig.axes:
-            try:
-                fig.canvas.draw()
-                pdf_file.savefig(fig, bbox_inches="tight", facecolor="white")
-                saved_count[0] += 1
-                png_path = (
-                    report_path.parent
-                    / f"{report_base}_page_{saved_count[0]:02d}.png"
-                )
-                fig.savefig(
-                    png_path, dpi=150, bbox_inches="tight", facecolor="white"
-                )
-                logger.info("  已保存圖表 %d: %s", saved_count[0], png_path.name)
-            except Exception as e:
-                logger.warning("保存圖表時失敗: %s", e)
-
-    _original_show = plt.show
-    plt.show = _save_on_show
-
-    # 將 Alphalens 在終端機輸出的文字（Quantiles Statistics、Returns Analysis、IC Analysis 等）
-    # 一併寫入報告目錄中的 summary 檔案
-    summary_path = report_path.parent / f"{report_base}_summary.txt"
-    try:
-        with open(summary_path, "w", encoding="utf-8") as summary_file, redirect_stdout(
-            summary_file
-        ):
-            create_full_tear_sheet(alphalens_data)
-    finally:
-        plt.show = _original_show
-        pdf_file.close()
-
-    if saved_count[0] > 0:
-        logger.info("報表已保存: %s", report_dir)
-    else:
-        logger.warning("未偵測到 Alphalens 產生的圖表")
-        report_dir = None
-
-    return report_dir
 
 
 def run_single_factor_analysis(params: dict) -> int:
@@ -242,11 +109,13 @@ def run_single_factor_analysis(params: dict) -> int:
     local_factor_path = params.get("local_factor")
     if params.get("auto_find_local"):
         if not local_price_path:
-            found = find_local_parquet_files(dataset_id, start, end, "price")
+            found = find_local_parquet_files(ROOT_DIR, dataset_id, start, end, "price")
             if found:
                 local_price_path = str(found)
         if not local_factor_path:
-            found = find_local_parquet_files(dataset_id, start, end, "factor")
+            found = find_local_parquet_files(
+                ROOT_DIR, dataset_id, start, end, "factor"
+            )
             if found:
                 local_factor_path = str(found)
 
@@ -285,19 +154,20 @@ def run_single_factor_analysis(params: dict) -> int:
             logger.warning("因子 %s 無資料，略過。", factor_name)
             continue
 
-        df_factor_std = _ensure_factor_datetime_asset_value(
+        df_factor_std = ensure_factor_datetime_asset_value(
             df_factor_raw, factor_name
         )
-        factor_series = _factor_series_for_alphalens(df_factor_std)
+        factor_series = factor_series_for_alphalens(df_factor_std)
 
+
+        max_loss = params.get("max_loss") or 0.35
         try:
-            # 預設放寬 max_loss，避免因缺資料中斷整體流程
             alphalens_data = get_clean_factor_and_forward_returns(
                 factor=factor_series,
                 prices=prices_alphalens,
                 quantiles=quantiles,
                 periods=periods,
-                max_loss=0.8,
+                max_loss=max_loss,
             )
         except MaxLossExceededError as e:
             logger.warning(
